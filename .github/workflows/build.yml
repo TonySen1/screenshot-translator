@@ -1,0 +1,94 @@
+name: build
+
+# 什么时候跑：
+#   - 推送到 main
+#   - 打 v 开头的 tag（会额外自动发 Release）
+#   - 别人提 Pull Request
+#   - 也可以在 Actions 页面手动点一下跑
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# 发 Release 需要写权限
+permissions:
+  contents: write
+
+jobs:
+  # ---------------------------------------------------------------
+  # 1. 跑测试。只跑不依赖真实屏幕 / 全局快捷键的那些 —— CI 环境里
+  #    没有多显示器和 DPI 设置，截图类测试跑了也没意义。
+  # ---------------------------------------------------------------
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 冒烟测试（所有模块能正常导入）
+        run: |
+          python -c "import config, icons, winutil, screenshot, translator, overlay, tray, settings_window, main; print('所有模块导入成功')"
+
+      - name: 翻译链路测试（对着本地 mock 服务跑，不联网）
+        run: python dev/test_translator.py
+
+      - name: 配置读写测试
+        run: |
+          python -c "
+          import json, os, tempfile
+          import config as c
+          d = tempfile.mkdtemp()
+          p = os.path.join(d, 'config.json')
+          cfg = c.load_config(p)
+          assert os.path.exists(p), '没有自动生成配置文件'
+          cfg.font_size = 21
+          cfg.api_key = 'sk-ci-test'
+          assert c.save_config(cfg, p), '保存失败'
+          back = c.load_config(p)
+          assert back.font_size == 21 and back.api_key == 'sk-ci-test', '读回来不一致'
+          raw = json.load(open(p, encoding='utf-8'))
+          assert '_说明' in raw, '保存时把说明字段弄丢了'
+          print('配置读写正常')
+          "
+
+  # ---------------------------------------------------------------
+  # 2. 打包成 exe
+  # ---------------------------------------------------------------
+  build:
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 打包
+        run: python build.py
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-translator-windows
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: 打了 v 开头的 tag 就自动发 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" dist/*.exe --title "${{ github.ref_name }}" --generate-notes
