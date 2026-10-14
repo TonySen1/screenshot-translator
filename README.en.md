@@ -1,5 +1,7 @@
 # Screenshot Translator
 
+[![build](https://github.com/TonySen1/screenshot-translator/actions/workflows/build.yml/badge.svg)](https://github.com/TonySen1/screenshot-translator/actions/workflows/build.yml)
+
 [中文说明](README.md) · **English**
 
 Press a hotkey, drag a box around anything on your screen, and the Chinese translation appears floating right where you selected it.

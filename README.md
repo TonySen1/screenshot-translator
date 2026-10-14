@@ -1,5 +1,7 @@
 # 截图翻译
 
+[![build](https://github.com/TonySen1/screenshot-translator/actions/workflows/build.yml/badge.svg)](https://github.com/TonySen1/screenshot-translator/actions/workflows/build.yml)
+
 **中文** · [English](README.en.md)
 
 按一下快捷键，框选屏幕上的一块区域，译文就直接浮在那块地方。
