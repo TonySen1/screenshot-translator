@@ -1,0 +1,40 @@
+# ============================================================
+#  配置文件里有明文的 API Key，绝对不要提交
+#  程序第一次运行会自动生成 config.json
+#  想给别人看格式，参考 config.example.json
+# ============================================================
+config.json
+config.local.json
+
+# 构建产物（自己 build 就有，不需要进仓库）
+dist/
+build/
+*.spec
+
+# 虚拟环境
+.venv/
+venv/
+env/
+ENV/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# 日志
+*.log
+
+# 开发时的临时产物
+dev/shot_*.png
+dev/_selftest_config.json
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

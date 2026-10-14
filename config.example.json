@@ -1,0 +1,28 @@
+{
+  "api_base_url": "https://api.openai.com/v1",
+  "api_key": "",
+  "model": "gpt-4o-mini",
+  "hotkey": "ctrl+alt+d",
+  "exit_hotkey": "ctrl+alt+shift+q",
+  "target_language": "中文",
+  "mask_opacity": 0.35,
+  "overlay_opacity": 0.88,
+  "overlay_bg": "#1e1e1e",
+  "overlay_fg": "#ffffff",
+  "font_size": 12,
+  "request_timeout": 30,
+  "_说明": {
+    "api_base_url": "OpenAI 兼容接口地址，末尾通常带 /v1",
+    "api_key": "在这里填你的 API Key（本文件是模板，程序首次运行会自动生成 config.json）",
+    "model": "多模态模型名，例如 gpt-4o-mini / qwen-vl-max / glm-4v",
+    "hotkey": "截图翻译全局快捷键",
+    "exit_hotkey": "退出程序全局快捷键",
+    "target_language": "翻译成什么语言",
+    "mask_opacity": "截图遮罩亮度，0.1~1.0，越小越暗",
+    "overlay_opacity": "结果浮层不透明度，0.3~1.0",
+    "overlay_bg": "浮层背景色",
+    "overlay_fg": "浮层文字颜色",
+    "font_size": "浮层字号（磅）",
+    "request_timeout": "接口超时时间（秒）"
+  }
+}
