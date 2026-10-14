@@ -85,6 +85,14 @@ jobs:
       - name: 打包
         run: python build.py
 
+      # 中文文件名经 PowerShell 传给 gh 时编码会出错，Release 附件会变成
+      # 莫名其妙的 "default.exe"。所以额外复制一份 ASCII 名的副本专供发布。
+      - name: 准备发布用的文件名
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem dist -Filter *.exe | Select-Object -First 1
+          Copy-Item -LiteralPath $exe.FullName -Destination "dist/ScreenshotTranslator.exe"
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v7
         with:
@@ -96,4 +104,4 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${{ github.ref_name }}" dist/*.exe --title "${{ github.ref_name }}" --generate-notes
+        run: gh release create "${{ github.ref_name }}" dist/ScreenshotTranslator.exe --title "${{ github.ref_name }}" --generate-notes
