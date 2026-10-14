@@ -28,7 +28,7 @@ Everything is configured from the tray icon's settings window — just drag the 
 
 ## Quick start (prebuilt exe)
 
-1. Grab `截图翻译.exe` from the [Releases](../../releases) page and put it in **a folder you created**, e.g. `D:\ScreenshotTranslator\`.
+1. Grab `ScreenshotTranslator.exe` from the [Releases](../../releases) page and put it in **a folder you created**, e.g. `D:\ScreenshotTranslator\`.
    Avoid the Desktop or `C:\Program Files` — Windows may block the app from writing its config there.
 2. **Run it once**, then quit it. It will create a `config.json` next to itself.
 3. Open `config.json` in Notepad and fill in your API key:
@@ -37,7 +37,7 @@ Everything is configured from the tray icon's settings window — just drag the 
    "api_key": "sk-your-key-here",
    ```
    Also check `api_base_url` and `model` (see [Configuration](#configuration) for examples).
-4. Save, then run `截图翻译.exe` again. This time it just sits quietly in the background.
+4. Save, then run the exe again. This time it just sits quietly in the background.
 5. Press **Ctrl + Alt + D**, drag a box around the text you want translated, release the mouse.
 6. A dark translucent panel appears at the selection with the translation. Press **Esc** when you're done.
 7. To quit for good, press **Ctrl + Alt + Shift + Q**.
