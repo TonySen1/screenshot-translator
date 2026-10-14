@@ -1,31 +1,20 @@
 name: build
 
-# 什么时候跑：
-#   - 推送到 main
-#   - 打 v 开头的 tag（会额外自动发 Release）
-#   - 别人提 Pull Request
-#   - 也可以在 Actions 页面手动点一下跑
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+分支: [main]
+标签: ['v*']
   pull_request:
   workflow_dispatch:
 
-# 发 Release 需要写权限
 permissions:
   contents: write
 
-# GitHub 的 Windows runner 默认用 cp1252 输出，打中文会直接报
-# UnicodeEncodeError 把整个步骤搞挂，所以统一成 UTF-8
 env:
   PYTHONIOENCODING: utf-8
 
 jobs:
-  # ---------------------------------------------------------------
-  # 1. 跑测试。只跑不依赖真实屏幕 / 全局快捷键的那些 —— CI 环境里
-  #    没有多显示器和 DPI 设置，截图类测试跑了也没意义。
-  # ---------------------------------------------------------------
+
   test:
     runs-on: windows-latest
     steps:
@@ -65,9 +54,7 @@ jobs:
           print('配置读写正常')
           "
 
-  # ---------------------------------------------------------------
-  # 2. 打包成 exe
-  # ---------------------------------------------------------------
+
   build:
     needs: test
     runs-on: windows-latest
@@ -85,8 +72,7 @@ jobs:
       - name: 打包
         run: python build.py
 
-      # 中文文件名经 PowerShell 传给 gh 时编码会出错，Release 附件会变成
-      # 莫名其妙的 "default.exe"。所以额外复制一份 ASCII 名的副本专供发布。
+
       - name: 准备发布用的文件名
         shell: pwsh
         run: |
