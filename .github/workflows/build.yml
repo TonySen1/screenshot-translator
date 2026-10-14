@@ -2,8 +2,8 @@ name: build
 
 on:
   push:
-分支: [main]
-标签: ['v*']
+    branches: [main]
+    tags: ['v*']
   pull_request:
   workflow_dispatch:
 
