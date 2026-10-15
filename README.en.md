@@ -4,7 +4,11 @@
 
 [中文说明](README.md) · **English** · [Changelog](CHANGELOG.md)
 
-Press a hotkey, drag a box around anything on your screen, and the Chinese translation appears floating right where you selected it.
+A tiny screenshot translator for Windows. Press a hotkey, drag a box around anything
+on your screen, and the translation appears floating right where you selected it.
+
+No main window, no sign-in, no ads, no history — your desktop stays clean, with just a
+small icon in the notification area. **Use it and forget it; it leaves no trace.**
 
 No main window, no login, no ads, no history. After launch there is nothing on your desktop except a small tray icon — it only shows itself the moment you press the hotkey.
 
