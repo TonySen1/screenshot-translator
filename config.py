@@ -42,7 +42,7 @@ HELP: dict = {
     "_说明": {
         "api_base_url": "OpenAI 兼容接口地址，末尾通常带 /v1",
         "api_key": "你的 API Key，必填；留空时按快捷键会提示填写",
-        "model": "多模态模型名，例如 gpt-4o-mini / qwen-vl-max / glm-4v",
+        "model": "多模态（能看图）模型名，设置页可以从接口拉取模型列表再选",
         "hotkey": "截图翻译全局快捷键",
         "exit_hotkey": "退出程序全局快捷键",
         "target_language": "翻译成什么语言",
@@ -183,6 +183,8 @@ def load_config(path: str | None = None) -> Config:
         request_timeout=_as_int(raw.get("request_timeout"), DEFAULTS["request_timeout"], 5, 300),
     )
 
+    _recover_from_services(raw, cfg)
+
     # 颜色值做个粗校验，避免 Tk 抛异常
     for name in ("overlay_bg", "overlay_fg"):
         value = getattr(cfg, name)
@@ -193,6 +195,33 @@ def load_config(path: str | None = None) -> Config:
     log.info("配置已加载：model=%s base_url=%s key=%s", cfg.model, cfg.api_base_url,
              "已填写" if cfg.has_api_key else "未填写")
     return cfg
+
+
+def _recover_from_services(raw: dict, cfg: Config) -> None:
+    """从上一版的「多服务商」结构里把用户填过的东西提回扁平字段。
+
+    上一版把每家服务商的配置分开存（translation_service + services）。
+    现在只留一份配置，但用户的 API Key 不能因为改结构就丢 —— 所以按当时
+    选中的那家提回来；提不出来就保持顶层字段的值。
+    """
+    stored = raw.get("services")
+    if not isinstance(stored, dict):
+        return
+    key = raw.get("translation_service")
+    entry = stored.get(key) if isinstance(key, str) else None
+    if not isinstance(entry, dict):
+        # 选中的那家没找到，就挑第一个填过 Key 的
+        entry = next((item for item in stored.values()
+                      if isinstance(item, dict) and item.get("api_key")), None)
+    if not isinstance(entry, dict):
+        return
+    if entry.get("api_key"):
+        cfg.api_key = str(entry["api_key"]).strip()
+    if entry.get("api_base_url"):
+        cfg.api_base_url = str(entry["api_base_url"]).strip()
+    if entry.get("model"):
+        cfg.model = str(entry["model"]).strip()
+    log.info("已从旧配置的多服务商结构里恢复出当前设置")
 
 
 def _looks_like_color(value: str) -> bool:

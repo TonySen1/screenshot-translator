@@ -13,8 +13,8 @@
   "request_timeout": 30,
   "_说明": {
     "api_base_url": "OpenAI 兼容接口地址，末尾通常带 /v1",
-    "api_key": "在这里填你的 API Key（本文件是模板，程序首次运行会自动生成 config.json）",
-    "model": "多模态模型名，例如 gpt-4o-mini / qwen-vl-max / glm-4v",
+    "api_key": "你的 API Key，必填；留空时按快捷键会提示填写",
+    "model": "多模态（能看图）模型名，设置页可以从接口拉取模型列表再选",
     "hotkey": "截图翻译全局快捷键",
     "exit_hotkey": "退出程序全局快捷键",
     "target_language": "翻译成什么语言",

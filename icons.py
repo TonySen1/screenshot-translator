@@ -1,15 +1,87 @@
 # -*- coding: utf-8 -*-
 """图标绘制。
 
-浮层上的按钮图标用 tkinter Canvas 现画（线条），这样悬停变色、跟随 DPI 缩放都很方便，
-也不用额外带图片文件。托盘图标用 Pillow 生成，因为 pystray 要的是 PIL Image。
+浮层上的按钮图标用 tkinter Canvas 现画（线条），这样悬停变色、跟随 DPI 缩放都很方便。
+仓库图标是位图（assets/github-light.ico）：官方标里曲线太密，折线逼近在小尺寸下全是锯齿。
+托盘图标用 Pillow 生成，因为 pystray 要的是 PIL Image。
 """
 
 from __future__ import annotations
 
+import logging
+import os
+import sys
 import tkinter as tk
 
 from PIL import Image, ImageDraw
+
+log = logging.getLogger(__name__)
+
+# 位图图标（目前只有仓库图标）。源图是 256x256，缩到实际显示尺寸前
+# 不做任何预处理 —— 缩放这一步就是抗锯齿本身。
+_BITMAP_ICONS = {
+    "repo": ("assets", "github-light.ico"),
+}
+
+# 着色后的结果缓存：悬停时会反复切换两种颜色，别每次都重新合成
+_BITMAP_CACHE: dict = {}
+
+
+def app_dir() -> str:
+    """程序所在目录。打包成 exe 后资源被解到 sys._MEIPASS。"""
+    if getattr(sys, "frozen", False):
+        return getattr(sys, "_MEIPASS", os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _tinted_icon(kind: str, size: int, color: str, canvas=None):
+    """把位图图标按目标尺寸缩放、染成指定颜色，返回 tk 能用的 PhotoImage。
+
+    做法：源图当遮罩用（它的 alpha 就是猫标形状），和目标尺寸的纯色块
+    按 alpha 合成 —— 这样边缘的平滑过渡保留了，颜色还能随便换。
+    源文件缺失或环境没有 Tk 时返回 None，调用方退回矢量画法。
+    """
+    key = (kind, size, color)
+    owner = canvas.tk if canvas is not None else None
+    cached = _BITMAP_CACHE.get(key)
+    # PhotoImage 绑在创建它的 Tk 解释器上：换了 root（比如设置窗口重开、
+    # 测试里先后建两个窗口）旧的就不能用了，得按新的重新合成。
+    # 否则会报 image "pyimage1" does not exist。
+    if cached is not None and cached[0] is owner:
+        return cached[1]
+
+    spec = _BITMAP_ICONS.get(kind)
+    if spec is None:
+        return None
+    try:
+        from PIL import ImageTk
+        with Image.open(os.path.join(app_dir(), *spec)) as src:
+            src.load()
+            side = max(1, int(size))
+            mask = src.convert("RGBA").getchannel("A")
+            mask = mask.resize((side, side), Image.LANCZOS)
+            shaped = Image.new("RGBA", (side, side), color)
+            shaped.putalpha(mask)
+            photo = ImageTk.PhotoImage(shaped)
+    except (OSError, ValueError, ImportError, tk.TclError) as exc:
+        log.warning("位图图标 %s 不可用（%s），退回矢量画法", kind, exc)
+        return None
+    # photo 要一直活着，否则 Tk 那边显示的图会变成空白
+    _BITMAP_CACHE[key] = (owner, photo, shaped)
+    return photo
+
+
+def tint_bitmap(canvas: tk.Canvas, item: int, kind: str, size: int, color: str) -> bool:
+    """给位图图标换色。成功返回 True，调用方据此决定要不要走矢量那套。"""
+    photo = _tinted_icon(kind, size, color, canvas)
+    if photo is None:
+        return False
+    try:
+        canvas.itemconfigure(item, image=photo)
+    except tk.TclError:
+        return False
+    return True
+
 
 # 所有图标都画在 0..20 的坐标系里，再按实际尺寸缩放
 _BOX = 20.0
@@ -28,7 +100,8 @@ def draw_icon(canvas: tk.Canvas, kind: str, color: str, size: int,
               bg: str = "", tags: str = "icon") -> list[int]:
     """在 canvas 上画一个图标，返回所有 item id（用来批量改颜色）。
 
-    kind: "extract"（提取文本）/ "copy"（复制）/ "close"（关闭）
+    kind: "extract"（提取文本）/ "copy"（复制）/ "close"（关闭）/
+          "move"（拖动）/ "repo"（项目仓库）
     """
     width = max(1, round(size / 11))
     items: list[int] = []
@@ -66,6 +139,16 @@ def draw_icon(canvas: tk.Canvas, kind: str, color: str, size: int,
             far, near, near, far,
             fill=color, width=stroke, capstyle="round", tags=tags))
 
+    elif kind == "repo":
+        # 仓库图标是位图（assets/github-light.ico，256x256 透明底白猫标）。
+        # 官方标里有大量细曲线，用 Canvas 折线去逼近在 20px 上全是锯齿，
+        # 交给 Pillow 做高质量缩放 + alpha 合成反而更干净。
+        image = _tinted_icon(kind, size, color, canvas)
+        if image is not None:
+            items.append(canvas.create_image(
+                canvas.winfo_reqwidth() // 2, canvas.winfo_reqheight() // 2,
+                image=image, tags=tags, anchor="center"))
+
     elif kind == "move":
         # 四向箭头，用作拖动提示（浮层上不显示，留给设置窗口用）
         cx, cy = _s(10, size), _s(10, size)
@@ -84,6 +167,8 @@ def tint_icon(canvas: tk.Canvas, items: list[int], color: str,
     坑点：Canvas 的 line 图元**没有** -outline 选项，对它设 outline 会抛 TclError。
     如果把一圈图元套在同一个 try 里，第一条线抛异常就会让后面所有图元都更新不到，
     表现成"图标颜色永远不变"。所以这里逐个图元、按类型分开设置。
+
+    位图图标（如仓库图标）不走这里 —— 它是一张整图，换色要用 tint_bitmap 换掉整张图。
     """
     for item in items:
         try:

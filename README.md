@@ -2,7 +2,7 @@
 
 [![build](https://github.com/TonySen1/screenshot-translator/actions/workflows/build.yml/badge.svg)](https://github.com/TonySen1/screenshot-translator/actions/workflows/build.yml)
 
-**中文** · [English](README.en.md)
+**中文** · [English](README.en.md) · [更新日志](CHANGELOG.md)
 
 按一下快捷键，框选屏幕上的一块区域，译文就直接浮在那块地方。
 
@@ -29,20 +29,19 @@
 1. 从 [Releases](../../releases) 页面下载 `ScreenshotTranslator.exe`，把它复制到一个**你自己新建的文件夹**里，比如 `D:\截图翻译\`。
    下载后可以自己改名成 `截图翻译.exe`，不影响运行。
    不要放在桌面或 C 盘的程序目录里，否则 Windows 可能不让它写配置文件。
-2. **先运行一次**，然后关掉它（它会自动在同一个文件夹里生成 `config.json`）。
-3. 用记事本打开 `config.json`，把 `api_key` 那一行填上你自己的 API Key：
-
-   ```json
-   "api_key": "sk-你自己的key",
-   ```
-   同时确认 `api_base_url` 和 `model` 是对的（往下看第 4 节有例子）。
-4. 保存文件，再双击那个 exe。这次它就安静地在后台待命了。
+2. **双击运行**。桌面上不会出现窗口，只在任务栏右下角的通知区域多一个小图标 —— 这是**正常的**。
+3. **右键那个小图标 → 打开设置**，在窗口里填好这几项，然后点「保存」：
+   - **接口地址**：填服务商的 OpenAI 兼容地址，形如 `https://xxx/v1`
+   - **API Key**：填你自己的 Key
+   - **模型**：点「拉取列表」从接口拉下来选一个
+   - 不确定能不能用就点「**测试服务**」——它会真发一张图过去试，告诉你 `连接成功` 还是 `连接失败`
+4. 关掉设置窗口。现在它就安静地在后台待命了。
 5. 按下 **Ctrl + Alt + D**，屏幕变暗，拖鼠标框住要翻译的内容，松手。
 6. 选中的位置会浮出一层深色半透明的译文。看完按 **Esc**，它就消失了。
 7. 想彻底关掉程序，按 **Ctrl + Alt + Shift + Q**。
 
-> 双击 exe 之后桌面上不会出现任何窗口，只在任务栏右下角的通知区域多一个小图标 —— 这是**正常的**。
-> 直接按快捷键用就行，那个托盘图标平时不用管它。
+> 配置存在 exe 旁边的 `config.json` 里，**设置页改的就是这个文件**，
+> 所以不用手动编辑 JSON。想了解每个字段的含义看[第四节](#四配置文件-configjson)。
 
 ### 快捷键
 
@@ -100,7 +99,7 @@
 | 分组 | 能改什么 |
 | --- | --- |
 | 外观 | 截图遮罩透明度、译文背景透明度、译文字号（都是拖动滑块） |
-| 接口 | 接口地址、API Key、模型名、目标语言 |
+| 翻译服务 | 接口地址、API Key、模型名（旁边有「拉取列表」和「测试服务」两个按钮）、目标语言 |
 | 快捷键 | 截图翻译、退出程序 |
 
 这些改动会写回 `config.json`，所以你也可以直接编辑文件，两种方式等价。
@@ -160,7 +159,7 @@ pyinstaller --noconfirm --clean --onefile --noconsole --name 截图翻译 --icon
 | --- | --- | --- |
 | `api_base_url` | `https://api.openai.com/v1` | 接口地址，末尾通常带 `/v1` |
 | `api_key` | 空 | **必填**。留空时按快捷键，浮层会提示你去填 |
-| `model` | `gpt-4o-mini` | 多模态模型名 |
+| `model` | `gpt-4o-mini` | 多模态（能看图）模型名 |
 | `hotkey` | `ctrl+alt+d` | 截图翻译快捷键 |
 | `exit_hotkey` | `ctrl+alt+shift+q` | 退出程序快捷键 |
 | `target_language` | `中文` | 翻译成什么语言 |
@@ -171,38 +170,40 @@ pyinstaller --noconfirm --clean --onefile --noconsole --name 截图翻译 --icon
 | `font_size` | `12` | 浮层字号（磅） |
 | `request_timeout` | `30` | 接口超时秒数 |
 
-改完保存，**下次启动生效**。字段写错不会让程序崩溃，程序会自动退回默认值并在日志里记一笔。
+改完保存，**立刻生效**（设置页保存后会重新注册快捷键、更新当前配置，不用重启）。
+字段写错不会让程序崩溃，程序会自动退回默认值并在日志里记一笔 ——
+不过**在设置页里改比手改文件省事**，下面这张表主要是给想直接编辑文件的人看的。
 
 ### 换一个翻译服务
 
-只要接口是 OpenAI 兼容格式（`/chat/completions`）就能用。几个例子：
+只要接口是 OpenAI 兼容格式（`/chat/completions`）就能用，不限于哪一家。设置窗口里：
 
-```jsonc
-// OpenAI 官方
-{ "api_base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini" }
+1. 填 **接口地址**（形如 `https://xxx/v1`）和 **API Key**
+2. 点 **拉取列表** —— 程序会调 `GET {接口地址}/models` 把可选的模型拉下来
+3. 从 **模型** 下拉里选一个（下拉里没有的名字也能手动输入）
+4. 点 **测试服务** 验证：会现画一张写着 42 的小图真发一次请求，只告诉你 `连接成功` 或 `连接失败`（失败原因在日志里）
 
-// DeepSeek（必须用带 vision 的档位，纯文本档位会拒绝图片）
-{ "api_base_url": "https://api.deepseek.com/v1", "model": "deepseek-flash" }
+**必须选能看图的模型** —— 这程序是把截图直接发给模型，让它一步完成识别和翻译，
+纯文本模型喂不了图片。下拉里模型很多时，程序会按模型名猜哪些像视觉模型并排在最前面，
+但那个只是启发式猜测（各家接口没有统一的标识位），最终以「测试服务」的结果为准。
 
-// 阿里通义千问（百炼）
-{ "api_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max" }
+几个常见的视觉模型：
 
-// 智谱 GLM
-{ "api_base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4v-plus" }
-
-// 本地 Ollama（需要先 ollama pull 一个视觉模型）
-{ "api_base_url": "http://127.0.0.1:11434/v1", "api_key": "ollama", "model": "llava" }
-```
-
-用的是多模态模型，**必须选能看图的模型**。几个常见的选择：
-
-| 服务商 | 模型名 | 说明 |
+| 服务商 | 接口地址 | 模型名 |
 | --- | --- | --- |
-| DeepSeek | `deepseek-flash` | 2026-08 上线的视觉档位。`deepseek-reasoner` 等纯文本档位**不支持图片** |
-| OpenAI | `gpt-4o-mini` | |
-| 阿里百炼 | `qwen-vl-max` | |
-| 智谱 | `glm-4v-plus` | |
-| 本地 | `llava` / `qwen2-vl` | 用 Ollama 跑，不联网 |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-flash`（**能看图**）。`deepseek-v4-pro` / `deepseek-chat` **不看图**，会把图片丢掉 |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| 硅基流动 | `https://api.siliconflow.cn/v1` | `Qwen/Qwen3-VL-8B-Instruct` |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4.6v-flash`（免费） |
+| 阿里百炼 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-vl-max` |
+| 本地 | `http://127.0.0.1:11434/v1` | `llava` / `qwen2-vl`（Ollama，不联网） |
+
+> **模型名上看不出哪个能看图** —— DeepSeek 的 `deepseek-flash` 能看、`deepseek-v4-pro` 不能，
+> 名字里毫无线索（不看图的模型会把图片块直接丢掉，接口仍然返回 200）。
+> 所以换模型后**务必点一次「测试服务」**：它真的发一张图过去试。
+
+> 智谱的 `glm-4v-flash` 虽然也免费，但官方接口文档写明「限制 1 张图像且**不支持 Base64** 编码」。
+> 本程序发的就是 base64 截图，所以别选它，用 `glm-4.6v-flash`。
 
 ---
 
@@ -238,11 +239,12 @@ screenshot-translator.log     （就在 exe / main.py 旁边）
 
 | 现象 | 原因 |
 | --- | --- |
-| 浮层显示“请先在 config.json 中填写 api_key” | `api_key` 是空的，去填一下 |
+| 浮层显示“请先在 config.json 中填写 api_key” | `api_key` 是空的 —— 右键托盘图标 → 设置，填上再点「测试服务」验证 |
 | 浮层显示“API Key 无效” | key 填错了，或者复制时带了空格 |
-| 浮层显示“模型名或 api_base_url 不正确” | 模型名拼错，或者接口地址少了 `/v1` |
+| 浮层显示“模型名或 api_base_url 不正确” | 模型名拼错，或者接口地址少了 `/v1`。设置页点「拉取列表」可以看这家到底有哪些模型名 |
 | 浮层显示“网络连接失败” | 网络不通，或者接口地址写错；用 OpenAI 官方接口一般需要代理 |
 | 浮层显示“请求超时” | 网络慢，把 `request_timeout` 调大一点 |
+| 「测试服务」一直失败，但 key 和地址都对 | 多半是这个模型**不支持图片**（见上一节）。换个能看图的模型 |
 | 按快捷键没反应 | 快捷键被别的软件占用了（有道词典、QQ、截图工具都爱占 `Ctrl+Alt+D`）。改 `config.json` 里的 `hotkey`，重启程序 |
 | 程序启动不了 / 双击没反应 | 看日志。也可能是已经有一个实例在跑——程序不允许开两个 |
 
@@ -304,3 +306,6 @@ screenshot-translator\
 ## 八、开源协议
 
 [MIT](LICENSE) —— 随便用、随便改、随便商用，保留版权声明、作者不担责。
+
+设置窗口左下角那个 GitHub 猫标来自官方 [Octicon `mark-github-16`](https://github.com/primer/octicons)，
+按 GitHub 的品牌规范原样引用、未做修改（图标本身是 GitHub 的商标）。

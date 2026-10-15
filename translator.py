@@ -199,13 +199,16 @@ def _friendly_error(exc: Exception, timeout: int) -> str:
     return f"翻译失败：{short}"
 
 
-def translate_image(image: Image.Image, cfg, png_base64: str | None = None) -> TranslationResult:
+def translate_image(image: Image.Image, cfg, png_base64: str | None = None,
+                    timeout: float | None = None) -> TranslationResult:
     """把选中的图片送去识别 + 翻译。
 
-    任何异常都会被吃掉并转换成 TranslationResult.error，绝不向上抛。
+    timeout 用于覆盖配置里的超时（设置页的"测试服务"希望快点返回，
+    不想让用户干等 30 秒）。任何异常都会被吃掉并转换成
+    TranslationResult.error，绝不向上抛。
     """
     if not cfg.has_api_key:
-        return TranslationResult(error="请先在 config.json 中填写 api_key")
+        return TranslationResult(error="请先填 api_key（右键托盘图标 → 打开设置）")
 
     if png_base64 is None:
         try:
@@ -220,7 +223,7 @@ def translate_image(image: Image.Image, cfg, png_base64: str | None = None) -> T
         client = OpenAI(
             api_key=cfg.api_key,
             base_url=cfg.api_base_url,
-            timeout=float(cfg.request_timeout),
+            timeout=float(timeout if timeout else cfg.request_timeout),
             max_retries=1,
         )
         response = client.chat.completions.create(
@@ -235,4 +238,4 @@ def translate_image(image: Image.Image, cfg, png_base64: str | None = None) -> T
         return result
     except Exception as exc:
         log.exception("翻译请求失败")
-        return TranslationResult(error=_friendly_error(exc, cfg.request_timeout))
+        return TranslationResult(error=_friendly_error(exc, int(timeout or cfg.request_timeout)))

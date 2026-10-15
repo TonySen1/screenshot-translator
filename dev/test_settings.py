@@ -74,8 +74,8 @@ def main() -> int:
         # --- 4. 输入框 ---
         win._api_key.delete(0, "end")
         win._api_key.insert(0, "sk-test-12345")
-        win._model.delete(0, "end")
-        win._model.insert(0, "my-model-v2")
+        win._model.add_value("my-model-v2")      # 模拟用户自定义模型名
+        win._model.set_value("my-model-v2")
         win._base_url.delete(0, "end")
         win._base_url.insert(0, "https://example.com/v1")
 
@@ -119,7 +119,7 @@ def main() -> int:
         win2.win.deiconify()
         win2.win.update()
         win2._base_url.delete(0, "end")
-        win2._model.delete(0, "end")
+        win2._model.set_value("")
         win2._api_key.delete(0, "end")
         captured = {}
         win2._on_save = lambda c: captured.update(cfg=c)

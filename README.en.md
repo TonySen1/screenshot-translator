@@ -2,7 +2,7 @@
 
 [![build](https://github.com/TonySen1/screenshot-translator/actions/workflows/build.yml/badge.svg)](https://github.com/TonySen1/screenshot-translator/actions/workflows/build.yml)
 
-[中文说明](README.md) · **English**
+[中文说明](README.md) · **English** · [Changelog](CHANGELOG.md)
 
 Press a hotkey, drag a box around anything on your screen, and the Chinese translation appears floating right where you selected it.
 
@@ -30,17 +30,19 @@ Everything is configured from the tray icon's settings window — just drag the 
 
 1. Grab `ScreenshotTranslator.exe` from the [Releases](../../releases) page and put it in **a folder you created**, e.g. `D:\ScreenshotTranslator\`.
    Avoid the Desktop or `C:\Program Files` — Windows may block the app from writing its config there.
-2. **Run it once**, then quit it. It will create a `config.json` next to itself.
-3. Open `config.json` in Notepad and fill in your API key:
-
-   ```json
-   "api_key": "sk-your-key-here",
-   ```
-   Also check `api_base_url` and `model` (see [Configuration](#configuration) for examples).
-4. Save, then run the exe again. This time it just sits quietly in the background.
+2. **Double-click it.** No window appears — you get a small icon in the taskbar notification area.
+3. **Right-click that icon → Settings**, fill in the fields, and click Save:
+   - **API base URL** and **API Key**
+   - **Model**: click **Fetch list** to pull the available models and pick one
+   - Not sure it works? Click **Test** next to it — it renders a small image and sends it
+     through the real translation path, then reports `Connected` or `Failed`
+4. Close the settings window. It now sits quietly in the background.
 5. Press **Ctrl + Alt + D**, drag a box around the text you want translated, release the mouse.
 6. A dark translucent panel appears at the selection with the translation. Press **Esc** when you're done.
 7. To quit for good, press **Ctrl + Alt + Shift + Q**.
+
+> Settings are stored in `config.json` next to the exe — that's the file the settings window
+> writes. You never need to edit JSON by hand; see [Configuration](#configuration) for what each field means.
 
 > Nothing happening after you double-click the exe is **expected** — it has no window.
 > Just press the hotkey. The tray icon sits in the notification area (you may need to click the `^` arrow to see it).
@@ -95,7 +97,7 @@ Everything here is written back to `config.json` and applies **immediately** —
 | Section | What you can change |
 | --- | --- |
 | Appearance | Mask opacity, panel opacity, font size (sliders) |
-| API | Base URL, API key, model, target language |
+| Translation service | Base URL, API key, model (with **Fetch list** and **Test** buttons), target language |
 | Hotkeys | Capture hotkey, quit hotkey |
 
 This window and the `config.json` file are equivalent — editing either one is fine.
@@ -156,7 +158,7 @@ The exe creates `config.json` next to itself on first run, so you can change set
 | --- | --- | --- |
 | `api_base_url` | `https://api.openai.com/v1` | API endpoint, usually ending in `/v1` |
 | `api_key` | *(empty)* | **Required.** If empty, the panel tells you to fill it in |
-| `model` | `gpt-4o-mini` | Vision-capable model name |
+| `model` | `gpt-4o-mini` | Vision-capable (image-input) model name |
 | `hotkey` | `ctrl+alt+d` | Capture hotkey |
 | `exit_hotkey` | `ctrl+alt+shift+q` | Quit hotkey |
 | `target_language` | `中文` | Language to translate into |
@@ -171,34 +173,30 @@ Bad values never crash the program — it falls back to the default and notes it
 
 ### Using a different provider
 
-Any OpenAI-compatible `/chat/completions` endpoint works. Some examples:
+Any OpenAI-compatible `/chat/completions` endpoint works. In the settings window:
 
-```jsonc
-// OpenAI
-{ "api_base_url": "https://api.openai.com/v1", "model": "gpt-4o-mini" }
+1. Enter the **API base URL** (like `https://xxx/v1`) and the **API key**
+2. Click **Fetch list** — the app calls `GET {base_url}/models` and fills the model dropdown
+3. Pick a model from the dropdown
+4. Click **Test** — it renders a small image reading `42` and sends it through the real
+   translation path. You get `Connected` or `Failed`; the reason goes to the log
 
-// DeepSeek (must use a vision-capable tier; text-only tiers reject images)
-{ "api_base_url": "https://api.deepseek.com/v1", "model": "deepseek-flash" }
+**The model must be able to see images.** The app sends the screenshot straight to the
+model, which does OCR and translation in one step; text-only models can't be fed a picture.
 
-// Alibaba Qwen (DashScope)
-{ "api_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-vl-max" }
-
-// Zhipu GLM
-{ "api_base_url": "https://open.bigmodel.cn/api/paas/v4", "model": "glm-4v-plus" }
-
-// Local Ollama (pull a vision model first)
-{ "api_base_url": "http://127.0.0.1:11434/v1", "api_key": "ollama", "model": "llava" }
-```
-
-The model **must be able to see images**:
-
-| Provider | Model | Note |
+| Provider | Base URL | Model |
 | --- | --- | --- |
-| DeepSeek | `deepseek-flash` | Vision tier added Aug 2026. `deepseek-reasoner` etc. do **not** accept images |
-| OpenAI | `gpt-4o-mini` | |
-| Alibaba | `qwen-vl-max` | |
-| Zhipu | `glm-4v-plus` | |
-| Local | `llava` / `qwen2-vl` | Via Ollama, fully offline |
+| DeepSeek | `https://api.deepseek.com/v1` | `deepseek-flash` (**vision**). `deepseek-v4-pro` / `deepseek-chat` do **not** accept images and silently drop them |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` |
+| SiliconFlow | `https://api.siliconflow.cn/v1` | `Qwen/Qwen3-VL-8B-Instruct` |
+| Zhipu GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4.6v-flash` (free) |
+| Alibaba DashScope | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-vl-max` |
+| Local | `http://127.0.0.1:11434/v1` | `llava` / `qwen2-vl` (Ollama, offline) |
+
+> **You cannot tell from the name whether a model accepts images** — DeepSeek's
+> `deepseek-flash` does, `deepseek-v4-pro` doesn't, and the API still returns 200 for both
+> (the non-vision one just drops the image block). Always run **Test** after switching models.
+
 
 ---
 
@@ -232,11 +230,12 @@ It records startup, hotkey registration, every translation, and full stack trace
 
 | Symptom | Cause |
 | --- | --- |
-| Panel says "请先在 config.json 中填写 api_key" | `api_key` is empty |
+| Panel says "请先在 config.json 中填写 api_key" | `api_key` is empty — right-click the tray icon → Settings, fill it in, then click **Test** |
 | Panel says "API Key 无效" | Wrong key, or a stray space when pasting |
 | Panel says "模型名或 api_base_url 不正确" | Model name typo, or the URL is missing `/v1` |
 | Panel says "网络连接失败" | No network, wrong URL, or you need a proxy for that provider |
 | Panel says "请求超时" | Slow network — increase `request_timeout` |
+| **Test** keeps failing although the key and URL are right | The model probably **cannot see images** (see [above](#using-a-different-provider)) — switch to a vision-capable one |
 | Hotkey does nothing | Another app grabbed it (dictionary tools, QQ, screenshot utilities all love `Ctrl+Alt+D`). Change `hotkey` in `config.json` and restart |
 | Won't start / nothing happens | Check the log. Or: an instance is already running — only one is allowed at a time |
 
@@ -290,3 +289,7 @@ To keep it from turning into bloat:
 ## License
 
 [MIT](LICENSE) — use it, modify it, ship it commercially. Just keep the copyright notice; no warranty.
+
+The GitHub mark in the bottom-left of the settings window comes from the official
+[Octicon `mark-github-16`](https://github.com/primer/octicons), used unmodified per
+GitHub's brand guidelines (the mark itself is a GitHub trademark).

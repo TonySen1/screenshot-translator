@@ -13,6 +13,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 APP_NAME = "截图翻译"
 ICON = os.path.join(HERE, "assets", "icon.ico")
+# 仓库图标是运行时读的位图，必须一起打进包，否则打包版读不到
+DATA = [(os.path.join(HERE, "assets", "github-light.ico"), "assets")]
 DIST = os.path.join(HERE, "dist")
 BUILD = os.path.join(HERE, "build")
 
@@ -71,6 +73,8 @@ def main() -> int:
         # pystray 的后端是运行时按平台挑的，PyInstaller 静态分析看不到
         "--hidden-import", "pystray._win32",
     ]
+    for source, dest in DATA:
+        args += ["--add-data", "%s%c%s" % (source, os.pathsep, dest)]
     for module in EXCLUDES:
         args += ["--exclude-module", module]
     args.append(os.path.join(HERE, "main.py"))
@@ -85,9 +89,11 @@ def main() -> int:
     if os.path.exists(exe):
         size = os.path.getsize(exe) / 1024 / 1024
         print("\n打包完成：%s （%.1f MB）" % (exe, size))
-        print("双击它就能用；首次运行请在它旁边放一份填好 api_key 的 config.json。")
-        # 顺手把配置模板拷到 dist，省得用户自己建
-        template = os.path.join(HERE, "config.json")
+        print("双击它就能用；右键托盘图标 → 打开设置，填好 API Key 再点「测试服务」验证。")
+        # 放一份配置模板到 dist，省得用户自己建。
+        # 注意只能拷 config.example.json（api_key 是空的）——
+        # 拷项目里那份 config.json 会把你自己的真 Key 一起带到发布包里。
+        template = os.path.join(HERE, "config.example.json")
         target = os.path.join(DIST, "config.json")
         if os.path.exists(template) and not os.path.exists(target):
             try:

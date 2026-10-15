@@ -54,6 +54,12 @@ jobs:
           print('配置读写正常')
           "
 
+      # 这两套都不需要显示器：拿不到时脚本会自己跳过窗口相关的检查
+      - name: 仓库图标测试
+        run: python dev/test_repo_icon.py
+
+      - name: 模型列表测试
+        run: python dev/test_model_list.py
 
   build:
     needs: test

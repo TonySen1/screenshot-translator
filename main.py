@@ -388,7 +388,7 @@ class App:
 
         if not self.cfg.has_api_key:
             log.warning("未填写 api_key")
-            overlay.show_error("请先在 config.json 中填写 api_key")
+            overlay.show_error("请先填 api_key（右键托盘图标 → 打开设置）")
             return
 
         threading.Thread(target=self._translate_worker, args=(crop, overlay),
