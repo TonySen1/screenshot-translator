@@ -271,12 +271,14 @@ def main() -> int:
         ctypes.windll.user32.mouse_event(0x0004, 0, 0, 0, 0)
 
         time.sleep(0.6)
+        # v1.2.0 起译文框和按钮框是两个独立窗口，所以是 2 个
         check("松开后遮罩消失、浮层出现",
-              len(tk_windows()) == 1 and brightness(grab()) > base_bright * 0.9,
+              len(tk_windows()) == 2 and brightness(grab()) > base_bright * 0.9,
               str(len(tk_windows())))
 
         time.sleep(2.0)
-        overlay = tk_windows()[0]
+        # 取面积最大的那个 = 译文框（按钮框只有 88x30）
+        overlay = max(tk_windows(), key=lambda w: w["rect"][2] * w["rect"][3])
         rect = overlay["rect"]
         print("浮层:", rect, flush=True)
         check("浮层贴在框选位置",
@@ -289,13 +291,16 @@ def main() -> int:
             os.path.join(PROJECT, "dev", "shot_exe_result.png"))
 
         # ---- 右下角三个图标按钮：提取 / 复制 / 关闭 ----
-        # 按 overlay.py 的常量推算：图标 14 + 两侧 padding 3 = 20，按钮间距 8，右内边距 12，下内边距 5
-        right, bottom = rect[0] + rect[2], rect[1] + rect[3]
-        side, gap, pad_x, pad_bottom = 20, 8, 12, 5
-        close_x = right - pad_x - side // 2
-        copy_x = close_x - (side + gap)
-        extract_x = copy_x - (side + gap)
-        btn_y = bottom - pad_bottom - side // 2
+        # v1.2.0 起按钮住在独立的按钮浮层里，贴在译文框右下角外侧，
+        # 所以坐标要以那个浮层为基准。常量见 overlay.py：
+        # 图标画布 20（图标 14 + 两侧 padding 3），按钮间距 8，浮层内边距 左右 6 / 上下 5。
+        btn_rect = next(w["rect"] for w in tk_windows() if w["rect"] != rect)
+        print("按钮浮层:", btn_rect, flush=True)
+        side, gap, pad_x, pad_y = 20, 8, 6, 5
+        extract_x = btn_rect[0] + pad_x + side // 2
+        copy_x = extract_x + (side + gap)
+        close_x = copy_x + (side + gap)
+        btn_y = btn_rect[1] + pad_y + side // 2
 
         pyperclip.copy("__before__")
         click(extract_x, btn_y)

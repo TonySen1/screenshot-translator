@@ -198,16 +198,18 @@ def main() -> int:
         drag(600, 600, 1400, 800)
         time.sleep(1.5)
         wins = tk_windows()
-        check("框选后浮层出现", len(wins) == 1, str(wins))
+        # v1.2.0 起译文框和按钮框是两个独立窗口，所以是 2 个
+        check("框选后浮层出现", len(wins) == 2, str(wins))
 
         # 等网络错误返回
         time.sleep(4.0)
         check("网络错误后程序没崩溃", proc.poll() is None)
-        check("错误时浮层仍在显示", len(tk_windows()) == 1, str(tk_windows()))
+        check("错误时浮层仍在显示", len(tk_windows()) == 2, str(tk_windows()))
 
         if wins:
             shot = grab()
-            x, y, w, h = wins[0]
+            # 取面积最大的那个 = 译文框（按钮框只有 88x30）
+            x, y, w, h = max(wins, key=lambda r: r[2] * r[3])
             shot.crop((max(0, x - 10), y + 588 - 10, x + w + 10, y + h + 588 + 10)).save(
                 os.path.join(PROJECT, "dev", "shot_edge_error.png"))
             print("浮层尺寸（font_size=20）:", (w, h), flush=True)

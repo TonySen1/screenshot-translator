@@ -178,9 +178,12 @@ def main() -> int:
           "基线 %.1f -> %.1f" % (base_bright, released_bright))
 
     overlay_windows = tk_windows(pid)
-    check("只剩下结果浮层一个窗口", len(overlay_windows) == 1, str(overlay_windows))
+    # v1.2.0 起译文框和按钮框是两个独立窗口
+    check("只剩下结果浮层两个窗口", len(overlay_windows) == 2, str(overlay_windows))
     if overlay_windows:
-        rect = overlay_windows[0]["rect"]
+        # 取面积最大的那个 = 译文框（按钮框只有 88x30）
+        rect = max(overlay_windows,
+                   key=lambda w: w["rect"][2] * w["rect"][3])["rect"]
         print("浮层位置尺寸:", rect, flush=True)
         check("浮层出现在框选位置",
               abs(rect[0] - x0) <= 4 and abs(rect[1] - y0) <= 4,
