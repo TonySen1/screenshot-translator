@@ -94,6 +94,10 @@ jobs:
 
       - name: 打了 v 开头的 tag 就自动发 Release
         if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "${{ github.ref_name }}" dist/ScreenshotTranslator.exe --title "${{ github.ref_name }}" --generate-notes
+        run: |
+          # 幂等：tag 被重建过（补示例图、补测试脚本这类）时 Release 已经存在，
+          # gh release create 会直接报错退出。这时改成覆盖已有 Release 的附件。
+          gh release create "${{ github.ref_name }}" dist/ScreenshotTranslator.exe --title "${{ github.ref_name }}" --generate-notes || gh release upload "${{ github.ref_name }}" dist/ScreenshotTranslator.exe --clobber
