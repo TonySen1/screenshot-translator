@@ -28,6 +28,10 @@ DOCS = os.path.join(HERE, "docs")
 
 W, H = 1000, 620
 WIN_X, WIN_Y = 420, 260          # 假界面窗口在屏幕上的位置
+# 四周留一圈纯色边距。裁图会带上这一圈，所以它必须是自己画出来的窗口 ——
+# 让 pad 超出窗口边界的话，裁到的就是真实桌面（终端、游戏、别的窗口全漏进来）。
+PAD = 16
+MARGIN_BG = "#1e1e1e"            # 边距颜色，和浮层底色一致
 
 # 文档正文（假的英文内容，用来演示"截英文翻中文"）
 LINES = [
@@ -132,12 +136,17 @@ def main() -> int:
     backdrop = tk.Toplevel(root)
     backdrop.overrideredirect(True)
     backdrop.attributes("-topmost", True)
-    backdrop.geometry("%dx%d+%d+%d" % (W, H, WIN_X, WIN_Y))
+    backdrop.configure(bg=MARGIN_BG)
+    # 铺满整屏，不只是为了那圈边距：屏幕上随时可能有别的 topmost 窗口
+    # （游戏 HUD、输入法候选框）盖在假界面上方，铺满 + 置顶才能压住它们。
+    backdrop.geometry("%dx%d+0+0" % (root.winfo_screenwidth(),
+                                     root.winfo_screenheight()))
     photo = None
     try:
         from PIL import ImageTk
         photo = ImageTk.PhotoImage(fake, master=backdrop)
-        tk.Label(backdrop, image=photo, bd=0).pack(fill="both", expand=True)
+        tk.Label(backdrop, image=photo, bd=0,
+                 bg=MARGIN_BG).place(x=WIN_X, y=WIN_Y)
     except Exception as exc:
         print("贴背景失败:", exc)
     backdrop.update()
@@ -160,8 +169,15 @@ def main() -> int:
     overlay.show_result(ORIGINAL, TRANSLATED)
     root.update()
     time.sleep(0.9)
+    # 从下到上重新抬一遍。只保证「浮层在最上」不够 —— 屏幕上随时可能有
+    # 第三方 topmost 窗口（游戏 HUD 之类）插进 backdrop 和浮层之间。
+    backdrop.lift()
+    overlay.win.lift()
+    overlay.button_win.lift()
+    root.update()
+    time.sleep(0.5)
     shot = grab()
-    crop_window(shot, WIN_X, WIN_Y, W, H, pad=16).save(
+    crop_window(shot, WIN_X, WIN_Y, W, H, pad=PAD).save(
         os.path.join(DOCS, "screenshot-overlay.png"))
     print("saved docs/screenshot-overlay.png", flush=True)
     overlay.close()
@@ -170,18 +186,34 @@ def main() -> int:
 
     # ---------- 3. 设置窗口 ----------
     install_styles(root)
+    sx, sy = WIN_X + 230, WIN_Y - 40
     win = SettingsWindow(root, cfg)
-    win.win.geometry("+%d+%d" % (WIN_X + 230, WIN_Y - 40))
+    win.win.geometry("+%d+%d" % (sx, sy))
     win.win.deiconify()
-    win.win.lift()
     root.update()
-    time.sleep(1.0)
-    shot2 = grab()
     gw = win.win.winfo_width()
     gh = win.win.winfo_height()
-    crop_window(shot2, WIN_X + 230, WIN_Y - 40, gw, gh, pad=14).save(
+
+    # 同样铺满整屏，理由同 backdrop
+    margin = tk.Toplevel(root)
+    margin.overrideredirect(True)
+    margin.attributes("-topmost", True)
+    margin.configure(bg=MARGIN_BG)
+    margin.geometry("%dx%d+0+0" % (root.winfo_screenwidth(),
+                                   root.winfo_screenheight()))
+    margin.update()
+
+    # 同样从下到上抬一遍
+    backdrop.lift()
+    margin.lift()
+    win.win.lift()
+    root.update()
+    time.sleep(0.8)
+    shot2 = grab()
+    crop_window(shot2, sx, sy, gw, gh, pad=PAD).save(
         os.path.join(DOCS, "screenshot-settings.png"))
     print("saved docs/screenshot-settings.png", flush=True)
+    margin.destroy()
     win._close()
 
     backdrop.destroy()
