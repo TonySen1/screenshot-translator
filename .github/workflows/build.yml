@@ -92,12 +92,28 @@ jobs:
           path: dist/*.exe
           if-no-files-found: error
 
+      # 抽不到对应版本就跳过（continue-on-error），下面会退回 --generate-notes
+      - name: 从 CHANGELOG 生成 Release 说明
+        if: startsWith(github.ref, 'refs/tags/v')
+        continue-on-error: true
+        run: python dev/release_notes.py "${{ github.ref_name }}" release-notes.md
+
       - name: 打了 v 开头的 tag 就自动发 Release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          # 说明优先用 CHANGELOG 里那一节：本仓库一直是直接往 main 提交、不走 PR，
+          # 而 --generate-notes 是按 PR 标题生成的，只会吐一行 Full Changelog 链接。
+          $tag = "${{ github.ref_name }}"
+          if (Test-Path release-notes.md) {
+            gh release create $tag dist/ScreenshotTranslator.exe --title $tag --notes-file release-notes.md
+          } else {
+            gh release create $tag dist/ScreenshotTranslator.exe --title $tag --generate-notes
+          }
           # 幂等：tag 被重建过（补示例图、补测试脚本这类）时 Release 已经存在，
           # gh release create 会直接报错退出。这时改成覆盖已有 Release 的附件。
-          gh release create "${{ github.ref_name }}" dist/ScreenshotTranslator.exe --title "${{ github.ref_name }}" --generate-notes || gh release upload "${{ github.ref_name }}" dist/ScreenshotTranslator.exe --clobber
+          if ($LASTEXITCODE -ne 0) {
+            gh release upload $tag dist/ScreenshotTranslator.exe --clobber
+          }
