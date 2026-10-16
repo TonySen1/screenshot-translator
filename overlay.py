@@ -20,18 +20,24 @@ from winutil import set_round_corners
 log = logging.getLogger(__name__)
 
 # 浮层的尺寸约束
-_MIN_WIDTH = 128          # 再窄三个图标就挤了
+_MIN_WIDTH = 128          # 译文浮层的最小宽度
 _MAX_WIDTH = 1000         # 不让它变成整屏
 _PADDING_X = 12           # 文本左右内边距
-_PADDING_TOP = 10
-_PADDING_BOTTOM = 5
-_GAP = 3                  # 正文和图标行之间的间距
+_PADDING_Y = 10           # 译文上下内边距，上下必须一样
 _BUTTON_GAP = 8           # 图标按钮之间的间距
 _BUTTON_PAD = 3           # 图标四周留白
 _MIN_FONT_SIZE = 9        # 自动缩字号的下限
 
 # 图标相对于一行文字的高度
 _ICON_RATIO = 0.70
+
+# 右下角那个独立的按钮浮层：自己的圆角窗口，贴在译文浮层的右下角外侧。
+# 两个窗口一起移动、一起销毁 —— 看起来就是一大一小两个框。
+# 底色和透明度都跟译文浮层同源（cfg.overlay_bg / cfg.overlay_opacity），
+# 圆角走 Win11 原生 DWM（set_round_corners），所以都不用自己画。
+_GROUP_PAD_X = 6          # 按钮浮层左右内边距
+_GROUP_PAD_Y = 5          # 按钮浮层上下内边距
+_GROUP_GAP = 6            # 按钮浮层和译文浮层之间的竖直间隙
 
 # 鼠标悬停多久才弹提示（毫秒）
 _TOOLTIP_DELAY_MS = 380
@@ -92,6 +98,9 @@ class _IconButton:
                                 highlightthickness=0, bd=0, cursor="hand2")
         self._items = draw_icon(self.canvas, kind, _ICON_FG_DISABLED, size,
                                 bg=bg, tags="icon")
+        # draw_icon 是从画布左上角起画的，画布比图标大 2*_BUTTON_PAD。
+        # 不挪一下的话，多出来的空白全堆在右下，整排图标看起来就偏左。
+        self.canvas.move("icon", _BUTTON_PAD, _BUTTON_PAD)
         # 立刻按自身状态重画一次：关闭按钮不走 set_enabled 那条路，
         # 不重画的话它会一直停留在上面的禁用色（暗灰）。
         self._repaint()
@@ -279,27 +288,41 @@ class Overlay:
             cursor="fleur",
         )
         self.text_label.grid(row=0, column=0, sticky="nsew",
-                             padx=_PADDING_X, pady=(_PADDING_TOP, 0))
+                             padx=_PADDING_X, pady=(_PADDING_Y, 0))
 
-        self._button_bar = tk.Frame(self.win, bg=bg, cursor="fleur")
-        self._button_bar.grid(row=1, column=0, sticky="e",
-                              padx=_PADDING_X, pady=(_GAP, _PADDING_BOTTOM))
+        # 三个图标住在另一个独立浮层里（自己的圆角窗口），贴在译文浮层的
+        # 右下角外侧。两个窗口一起移动、一起销毁。
+        side = self._icon_size + 2 * _BUTTON_PAD
+        self._group_width = 2 * _GROUP_PAD_X + 3 * side + 2 * _BUTTON_GAP
+        self._group_height = 2 * _GROUP_PAD_Y + side
+
+        self.button_win = tk.Toplevel(root)
+        self.button_win.withdraw()
+        self.button_win.overrideredirect(True)
+        self.button_win.attributes("-topmost", True)
+        self.button_win.configure(bg=bg)
+        try:
+            self.button_win.attributes("-alpha", float(cfg.overlay_opacity))
+        except tk.TclError:
+            pass
 
         self._tip_font = tkfont.Font(root=root, family=family,
                                      size=max(_MIN_FONT_SIZE, cfg.font_size - 3))
-        self.extract_button = _IconButton(
-            self._button_bar, "extract", self._icon_size, self._copy_original, bg,
-            tooltip="复制文字", font=self._tip_font)
-        self.extract_button.pack(side="left", padx=(0, _BUTTON_GAP))
-        self.copy_button = _IconButton(
-            self._button_bar, "copy", self._icon_size, self._copy_translated, bg,
-            tooltip="复制翻译", font=self._tip_font)
-        self.copy_button.pack(side="left", padx=(0, _BUTTON_GAP))
-        self.close_button = _IconButton(
-            self._button_bar, "close", self._icon_size, self.close, bg,
-            hover_color=_ICON_CLOSE_HOVER, tooltip="关闭", font=self._tip_font,
-            color=_ICON_CLOSE_FG)
-        self.close_button.pack(side="left")
+        specs = (
+            ("extract", self._copy_original, "复制文字", _ICON_FG_HOVER, _ICON_FG),
+            ("copy", self._copy_translated, "复制翻译", _ICON_FG_HOVER, _ICON_FG),
+            ("close", self.close, "关闭", _ICON_CLOSE_HOVER, _ICON_CLOSE_FG),
+        )
+        buttons: list[_IconButton] = []
+        for index, (kind, command, tooltip, hover, color) in enumerate(specs):
+            button = _IconButton(
+                self.button_win, kind, self._icon_size, command, bg,
+                hover_color=hover, tooltip=tooltip, font=self._tip_font, color=color)
+            # 浮层尺寸是「内容 + 对称留白」算出来的，所以这排按钮天然居中
+            button.canvas.place(
+                x=_GROUP_PAD_X + index * (side + _BUTTON_GAP), y=_GROUP_PAD_Y)
+            buttons.append(button)
+        self.extract_button, self.copy_button, self.close_button = buttons
 
         # 兼容旧名字（测试脚本还在用）
         self.copy_original_label = self.extract_button.canvas
@@ -307,15 +330,16 @@ class Overlay:
 
         self._set_buttons_enabled(False)
 
-        # 拖动整个浮层
-        for widget in (self.win, self.text_label, self._button_bar):
+        # 拖动：抓译文框或按钮框都行，两个一起走
+        for widget in (self.win, self.text_label, self.button_win):
             widget.bind("<Button-1>", self._on_drag_start)
             widget.bind("<B1-Motion>", self._on_drag_move)
             widget.bind("<ButtonRelease-1>", self._on_drag_end)
 
-        # Esc / 右键关闭
-        for sequence in ("<Escape>", "<Button-3>"):
-            self.win.bind(sequence, self._on_escape)
+        # Esc / 右键关闭（按钮框上也绑一份，右键点在它上面也能关）
+        for window in (self.win, self.button_win):
+            for sequence in ("<Escape>", "<Button-3>"):
+                window.bind(sequence, self._on_escape)
 
         self.win.update_idletasks()
         self._apply_layout(_LOADING_TEXT)
@@ -354,10 +378,11 @@ class Overlay:
             self.win.unbind_all("<Escape>")
         except tk.TclError:
             pass
-        try:
-            self.win.destroy()
-        except tk.TclError:
-            pass
+        for window in (self.button_win, self.win):
+            try:
+                window.destroy()
+            except tk.TclError:
+                pass
         log.debug("浮层已关闭")
         # 通知主程序：浮层没了，Esc 兜底热键可以摘了
         if self._on_close is not None:
@@ -375,8 +400,13 @@ class Overlay:
             self.win.lift()
             self.win.attributes("-topmost", True)
             self.win.focus_force()
-            # Win11 原生小圆角；老系统上这个调用会失败，不影响使用
-            set_round_corners(self.win, small=True)
+            # 按钮浮层跟着一起亮相
+            self.button_win.deiconify()
+            self.button_win.lift()
+            self.button_win.attributes("-topmost", True)
+            # Win11 原生圆角；老系统上这个调用会失败，不影响使用
+            set_round_corners(self.win, small=False)
+            set_round_corners(self.button_win, small=False)
         except tk.TclError:
             log.exception("显示浮层失败")
 
@@ -393,9 +423,9 @@ class Overlay:
         if self._drag_offset is None or self._closed:
             return
         try:
-            x = event.x_root - self._drag_offset[0]
-            y = event.y_root - self._drag_offset[1]
-            self.win.geometry("+{}+{}".format(int(x), int(y)))
+            x = int(event.x_root - self._drag_offset[0])
+            y = int(event.y_root - self._drag_offset[1])
+            self._move_to(x, y, self.win.winfo_width(), self.win.winfo_height())
             self._user_moved = True
         except tk.TclError:
             pass
@@ -424,50 +454,43 @@ class Overlay:
         lines = (text or "").split("\n") or [""]
         return max((self._body_font.measure(line) for line in lines), default=0)
 
-    def _layout_size(self, text: str, buttons_width: int) -> tuple[int, int]:
-        """按当前字号算一次浮层的 (宽, 高)。
+    def _layout_size(self, text: str) -> tuple[int, int]:
+        """按当前字号算一次译文浮层的 (宽, 高)。
 
         宽度优先贴合文字：短译文就给一小块底板，只有文字太宽时才拉宽并换行。
+        按钮浮层是独立的窗口，不占这里的尺寸。
         """
         text_width = self._natural_text_width(text)
-        width = max(text_width + 2 * _PADDING_X,
-                    buttons_width + 2 * _PADDING_X,
-                    _MIN_WIDTH)
+        width = max(text_width + 2 * _PADDING_X, _MIN_WIDTH)
         width = min(width, self._max_width)
         try:
             self.text_label.configure(wraplength=max(40, width - 2 * _PADDING_X))
             self.win.update_idletasks()
             height = (int(self.text_label.winfo_reqheight())
-                      + _PADDING_TOP + _GAP
-                      + int(self._button_bar.winfo_reqheight())
-                      + _PADDING_BOTTOM)
+                      + 2 * _PADDING_Y)
         except tk.TclError:
             return int(width), 0
         return int(width), int(height)
 
     def _apply_layout(self, text: str) -> None:
         """重算尺寸并摆放窗口。文字太长就逐步缩小字号。"""
-        try:
-            buttons_width = int(self._button_bar.winfo_reqwidth())
-        except tk.TclError:
-            buttons_width = _MIN_WIDTH
-
         available = self._available_height()
         size = int(self._cfg.font_size)
-        width, height = self._layout_size(text, buttons_width)
+        width, height = self._layout_size(text)
 
         while height > available and size > _MIN_FONT_SIZE:
             size -= 1
             self._body_font.configure(size=size)
-            width, height = self._layout_size(text, buttons_width)
+            width, height = self._layout_size(text)
 
         self._width = width
         self._place(min(height, available))
 
     def _available_height(self) -> int:
+        """竖着能用多少像素 —— 要扣掉下面那块按钮浮层。"""
         if self._screen is None:
             return 100000
-        return max(120, int(self._screen.height * 0.92))
+        return max(120, int(self._screen.height * 0.92) - self._group_height)
 
     def _place(self, height: int) -> None:
         """摆放窗口。用户手动拖过之后，就只改大小、不再挪位置。"""
@@ -479,14 +502,21 @@ class Overlay:
                 return
         else:
             x, y = self._default_position(width, height)
+        self._move_to(int(x), int(y), width, height)
 
+    def _move_to(self, x: int, y: int, width: int, height: int) -> None:
+        """把译文浮层挪到 (x, y)，按钮浮层跟着贴到它的右下角外侧。"""
         try:
             self.win.geometry("{}x{}+{}+{}".format(width, height, x, y))
+            self.button_win.geometry("{}x{}+{}+{}".format(
+                self._group_width, self._group_height,
+                x + width - self._group_width,
+                y + height + _GROUP_GAP))
         except tk.TclError:
             log.exception("设置浮层位置失败")
 
     def _default_position(self, width: int, height: int) -> tuple[int, int]:
-        """默认贴在框选区域的左上角，并保证整个浮层落在屏幕内。"""
+        """默认贴在框选区域的左上角，并保证「译文框 + 按钮框」都落在屏幕内。"""
         x, y = self._selection.left, self._selection.top
         if self._screen is None:
             return x, y
@@ -494,13 +524,15 @@ class Overlay:
         margin = 8
         left, top = self._screen.left, self._screen.top
         right, bottom = self._screen.right, self._screen.bottom
+        # 竖着要同时放得下两块
+        stack = height + _GROUP_GAP + self._group_height
 
         if x + width > right - margin:
             x = right - margin - width
         if x < left + margin:
             x = left + margin
-        if y + height > bottom - margin:
-            y = min(self._selection.bottom - height, bottom - margin - height)
+        if y + stack > bottom - margin:
+            y = min(self._selection.bottom - stack, bottom - margin - stack)
         if y < top + margin:
             y = top + margin
         return int(x), int(y)

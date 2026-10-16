@@ -18,6 +18,9 @@ from dataclasses import dataclass, fields
 
 log = logging.getLogger(__name__)
 
+# 程序版本号。发版时改这里，同时给 CHANGELOG.md 顶上补一节。
+APP_VERSION = "1.2.0"
+
 # 配置文件名
 CONFIG_NAME = "config.json"
 

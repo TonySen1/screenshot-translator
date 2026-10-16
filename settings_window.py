@@ -16,7 +16,7 @@ from tkinter import ttk
 
 import model_list
 import service_test
-from config import Config
+from config import APP_VERSION, Config
 from icons import draw_icon, tint_bitmap, tint_icon
 from winutil import set_round_corners
 
@@ -375,6 +375,16 @@ class SettingsWindow:
         # 所以量完两边的实际高度再补一点上边距，让它们垂直居中在同一条线上。
         self._repo = _RepoButton(footer, _REPO_URL, "打开项目仓库", self._f_label)
         self._repo.pack(side="left")
+        # 版本号跟在图标右边，和图标一样能点开仓库。pack 会把它排在图标之后，
+        # 所以 _align_footer_icon 给图标补的左内边距会把它一起推到位。
+        self._version = tk.Label(footer, text="v" + APP_VERSION, bg=_BG,
+                                 fg=_TEXT_DIM, font=self._f_label, cursor="hand2")
+        self._version.pack(side="left", padx=(7, 0))
+        self._version.bind("<Button-1>", lambda _e: self._open_repo())
+        self._version.bind("<Enter>",
+                           lambda _e: self._version.configure(fg=_ICON_HOVER))
+        self._version.bind("<Leave>",
+                           lambda _e: self._version.configure(fg=_TEXT_DIM))
         self._footer = footer
         self._cancel_button = cancel
 
@@ -415,6 +425,14 @@ class SettingsWindow:
         padx = max(0, _REPO_INSET - base_x)
         pady = max(0, _REPO_INSET_BOTTOM - base_y) + _REPO_PADY_TRIM
         self._repo.pack_configure(padx=(padx, 0), pady=(max(0, pady), 0))
+
+    def _open_repo(self) -> None:
+        """用浏览器打开项目仓库。左下角的图标和版本号都走这里。"""
+        try:
+            webbrowser.open(_REPO_URL)
+        except Exception:
+            # 打不开浏览器不算错误，别把设置窗口弄崩
+            log.exception("打开仓库地址失败：%s", _REPO_URL)
 
     def _build_titlebar(self, parent: tk.Misc) -> None:
         bar = tk.Frame(parent, bg=_BG, height=36)
