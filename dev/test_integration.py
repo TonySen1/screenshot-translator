@@ -59,7 +59,7 @@ def main() -> int:
         app = main_module.App(root, cfg)
         check("App 初始化完成", app is not None)
         check("未启动托盘（测试替身生效）", app.tray is None)
-        check("截图热键已注册", len(app._hotkey_handles) == 2,
+        check("热键已注册（截图/退出/Esc）", len(app._hotkey_handles) == 3,
               "注册了 %d 个" % len(app._hotkey_handles))
 
         state = {"settings_seen": False, "saved": False}
@@ -110,7 +110,7 @@ def main() -> int:
                 reloaded = config_module.load_config(CONFIG)
                 check("写回的配置能被重新读出来", reloaded.font_size == 15,
                       "font_size=%d" % reloaded.font_size)
-            check("保存后热键重新注册成功", len(app._hotkey_handles) == 2,
+            check("保存后热键重新注册成功", len(app._hotkey_handles) == 3,
                   "注册了 %d 个" % len(app._hotkey_handles))
             check("清理后没有残留设置窗口", len(settings_windows(root)) == 0)
             app.quit()

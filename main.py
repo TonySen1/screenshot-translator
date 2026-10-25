@@ -44,6 +44,9 @@ EVENT_TRANSLATED = "translated"
 EVENT_ESCAPE = "escape"
 EVENT_SETTINGS = "settings"
 
+# 键盘监听线程的健康检查间隔
+_PROBE_INTERVAL_MS = 60_000
+
 
 # --------------------------------------------------------------------------
 # 基础设施
@@ -157,8 +160,12 @@ class App:
         self.capturing = False
         self.quitting = False
         self._hotkey_handles: list = []
-        self._esc_handle = None
-        self._esc_hooked = False
+        # 遮罩开着时连按热键会往队列里堆一串请求，取消后就会连续弹遮罩。
+        # 这个标志保证同一时刻最多只有一个待处理的截图请求。
+        self._capture_pending = threading.Event()
+        # 键盘监听线程健康检查
+        self._probe_failures = 0
+        self._probe_job = None
         self._pump_job = None
         self._screen: screenshot.Rect | None = None
         self.settings_open = False
@@ -196,12 +203,13 @@ class App:
         # 重新注册前先摘掉旧的（设置窗口改完快捷键会再走一次这里）
         self._unregister_hotkeys()
 
-        def add(combo: str, event: str, suppress: bool) -> bool:
+        def add(combo: str, event: str, suppress: bool, quiet: bool = False) -> bool:
             try:
                 handle = keyboard.add_hotkey(
-                    combo, lambda: self.queue.put((event, None)), suppress=suppress)
+                    combo, lambda: self._dispatch(event), suppress=suppress)
                 self._hotkey_handles.append(handle)
-                log.info("已注册热键：%s", combo)
+                if not quiet:
+                    log.info("已注册热键：%s", combo)
                 return True
             except Exception as exc:
                 log.error("热键 %s 注册失败：%s", combo, exc)
@@ -215,6 +223,114 @@ class App:
         if not add(self.cfg.exit_hotkey, EVENT_QUIT, suppress=False):
             if self.cfg.exit_hotkey.lower() != config_module.DEFAULTS["exit_hotkey"]:
                 add(config_module.DEFAULTS["exit_hotkey"], EVENT_QUIT, suppress=False)
+
+        # Esc 兜底改成常驻。以前是每次截图都 add、关掉再 remove，
+        # 这种频繁增删最容易让 keyboard 库的内部状态出错。
+        # 常驻后回调里自己判断有没有遮罩/浮层，没有就什么都不做。
+        if self._uses_escape():
+            log.debug("自定义热键用到了 Esc，跳过常驻 Esc 兜底")
+        else:
+            add("esc", EVENT_ESCAPE, suppress=False)
+
+        self._start_watchdog()
+
+    def _uses_escape(self) -> bool:
+        for combo in (self.cfg.hotkey, self.cfg.exit_hotkey):
+            for part in combo.split("+"):
+                if part.strip().lower() in ("esc", "escape"):
+                    return True
+        return False
+
+    def _dispatch(self, event: str) -> None:
+        """热键回调。跑在 keyboard 的钩子线程里，只做判断和投递。
+
+        遮罩已经开着、设置窗口开着、或者队列里已经有一个截图请求时，
+        再按快捷键就直接丢掉 —— 否则取消遮罩后会把积压的请求逐条执行，
+        看起来就像「快捷键乱了」。
+        """
+        if self.quitting:
+            return
+        if event == EVENT_CAPTURE:
+            if self.capturing or self.settings_open:
+                log.debug("忽略截图请求：正在截图或设置窗口开着")
+                return
+            if self._capture_pending.is_set():
+                log.debug("忽略截图请求：队列里已有一个待处理的")
+                return
+            self._capture_pending.set()
+        self.queue.put((event, None))
+
+    # ---------- 键盘钩子自检 ----------
+
+    def _start_watchdog(self) -> None:
+        """定期检查键盘监听线程是否还活着。
+
+        原来想用"自己发一个 F24、看钩子收不收得到"来探活，但实测某些环境下
+        合成按键并不会回到本进程的钩子，那样会误判成失效、每两分钟重装一次，
+        反而制造出热键短暂失灵。所以这里只做零风险的状态检查：
+        线程死了或 listening 掉了才重装。
+        """
+        if self._probe_job is not None:
+            try:
+                self.root.after_cancel(self._probe_job)
+            except tk.TclError:
+                pass
+            self._probe_job = None
+        self._schedule_probe()
+
+    def _schedule_probe(self) -> None:
+        if self.quitting:
+            return
+        try:
+            self._probe_job = self.root.after(_PROBE_INTERVAL_MS, self._probe)
+        except tk.TclError:
+            self._probe_job = None
+
+    def _probe(self) -> None:
+        if self.quitting:
+            return
+        import keyboard
+
+        listener = getattr(keyboard, "_listener", None)
+        # 属性名是 listening_thread（keyboard 0.13.5 的实际实现）
+        thread = getattr(listener, "listening_thread", None) if listener is not None else None
+        healthy = bool(
+            listener is not None
+            and getattr(listener, "listening", False)
+            and thread is not None
+            and thread.is_alive()
+        )
+        if healthy:
+            if self._probe_failures:
+                log.info("键盘监听线程恢复正常")
+            self._probe_failures = 0
+        else:
+            self._probe_failures += 1
+            log.warning("键盘监听线程异常（第 %d 次）", self._probe_failures)
+            if self._probe_failures >= 2:
+                self._recover_hooks()
+        self._schedule_probe()
+
+    def _recover_hooks(self) -> None:
+        """重装键盘钩子。光重新 add_hotkey 没用，必须把监听线程停掉再启动。"""
+        log.warning("键盘钩子疑似失效，正在重新安装")
+        self._probe_failures = 0
+        import keyboard
+
+        try:
+            keyboard.unhook_all()
+            listener = getattr(keyboard, "_listener", None)
+            if listener is not None:
+                thread = getattr(listener, "listening_thread", None)
+                if thread is None or not thread.is_alive():
+                    # 线程真的死了：把 listening 复位后重新拉起
+                    listener.listening = False
+                    time.sleep(0.2)
+                    listener.start_if_necessary()
+            getattr(keyboard, "_hotkeys", {}).clear()
+        except Exception:
+            log.exception("重装键盘钩子失败")
+        self._register_hotkeys()
 
     def _start_tray(self) -> None:
         """托盘图标。右键出菜单，双击打开设置。
@@ -240,7 +356,6 @@ class App:
             if self.mask is not None:
                 self.mask.cancel()
                 self.mask = None
-            self._sync_escape_hook()
 
             # 让设置窗口里的快捷键录制能收到真实按键
             self._unregister_hotkeys()
@@ -261,34 +376,6 @@ class App:
             self.settings_open = False
             # 不管有没有保存，都按当前配置把全局热键装回去
             self._register_hotkeys()
-            self._sync_escape_hook()
-
-    def _sync_escape_hook(self) -> None:
-        """遮罩/浮层显示期间挂一个全局 Esc 兜底，保证 Esc 一定关得掉。
-
-        窗口自身也绑了 Esc，这里是防止焦点被别的窗口抢走时按 Esc 没反应。
-        不吞按键（suppress=False），所以不会影响别的程序。
-        """
-        wanted = bool(self.mask is not None or self.overlay is not None)
-        if wanted == self._esc_hooked:
-            return
-        import keyboard
-
-        if wanted:
-            try:
-                self._esc_handle = keyboard.add_hotkey(
-                    "esc", lambda: self.queue.put((EVENT_ESCAPE, None)), suppress=False)
-                self._esc_hooked = True
-            except Exception:
-                log.exception("注册 Esc 兜底热键失败（可以点浮层再按 Esc）")
-        else:
-            if self._esc_handle is not None:
-                try:
-                    keyboard.remove_hotkey(self._esc_handle)
-                except Exception:
-                    pass
-                self._esc_handle = None
-            self._esc_hooked = False
 
     # ---------- 事件泵 ----------
 
@@ -320,6 +407,7 @@ class App:
 
     def _handle(self, event: str, payload) -> None:
         if event == EVENT_CAPTURE:
+            self._capture_pending.clear()
             self.start_capture()
         elif event == EVENT_QUIT:
             self.quit()
@@ -339,7 +427,6 @@ class App:
         elif self.overlay is not None and not self.overlay.closed:
             self.overlay.close()
             self.overlay = None
-            self._sync_escape_hook()
 
     # ---------- 截图流程 ----------
 
@@ -357,7 +444,6 @@ class App:
             log.exception("截图流程异常")
         finally:
             self.capturing = False
-            self._sync_escape_hook()
 
     def _capture_once(self) -> None:
         # 上一次的浮层要先消失，否则会被拍进新截图里
@@ -400,7 +486,6 @@ class App:
             log.exception("浮层创建失败")
             return
         self.overlay = overlay
-        self._sync_escape_hook()
 
         if not self.cfg.has_api_key:
             log.warning("未填写 api_key")
@@ -411,19 +496,16 @@ class App:
                          name="translate", daemon=True).start()
 
     def _on_overlay_closed(self, overlay) -> None:
-        """浮层被关掉了（Esc / 点 X / 右键），把引用和 Esc 兜底热键一起收掉。"""
+        """浮层被关掉了（Esc / 点 X / 右键），把引用清掉。"""
         if self.overlay is overlay:
             self.overlay = None
-        self._sync_escape_hook()
 
     def _on_mask_open(self, mask) -> None:
         self.mask = mask
-        self._sync_escape_hook()
 
     def _on_mask_close(self, mask) -> None:
         if self.mask is mask:
             self.mask = None
-        self._sync_escape_hook()
 
     def _translate_worker(self, crop, overlay: Overlay) -> None:
         result = TranslationResult(error="翻译失败")
@@ -453,7 +535,6 @@ class App:
             except Exception:
                 log.exception("关闭浮层失败")
             self.overlay = None
-        self._sync_escape_hook()
 
     # ---------- 退出 ----------
 
@@ -463,6 +544,13 @@ class App:
         self.quitting = True
         log.info("退出程序")
         import keyboard
+
+        if self._probe_job is not None:
+            try:
+                self.root.after_cancel(self._probe_job)
+            except tk.TclError:
+                pass
+            self._probe_job = None
 
         if self.tray is not None:
             try:
