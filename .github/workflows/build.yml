@@ -32,6 +32,9 @@ jobs:
         run: |
           python -c "import config, icons, winutil, screenshot, translator, overlay, tray, settings_window, main; print('所有模块导入成功')"
 
+      - name: 快捷键解析测试（不碰 Tk 窗口）
+        run: python dev/test_hotkey.py --parsing-only
+
       - name: 翻译链路测试（对着本地 mock 服务跑，不联网）
         run: python dev/test_translator.py
 

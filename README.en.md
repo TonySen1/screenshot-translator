@@ -102,9 +102,11 @@ Everything here is written back to `config.json` and applies **immediately** —
 | --- | --- |
 | Appearance | Mask opacity, panel opacity, font size (sliders) |
 | Translation service | Base URL, API key, model (with **Fetch list** and **Test** buttons), target language |
-| Hotkeys | Capture hotkey, quit hotkey |
+| Hotkeys | Capture hotkey, quit hotkey (**click the field, then just press the combination**) |
 
 This window and the `config.json` file are equivalent — editing either one is fine.
+
+**Recording a hotkey:** click the input field and press the combination you want — it fills in as soon as you press the main key. Press `Esc` to cancel. While recording, the modifiers you're holding show up live (`Ctrl+…` → `Ctrl+Alt+…`). Saving validates the result: modifiers-only, duplicate modifiers, multiple main keys, non-ASCII characters, or the two hotkeys being identical all get rejected with an inline message.
 
 ---
 

@@ -14,11 +14,12 @@ import tkinter.font as tkfont
 import webbrowser
 from tkinter import ttk
 
+import hotkey as hotkey_mod
 import model_list
 import service_test
 from config import APP_VERSION, Config
 from icons import draw_icon, tint_bitmap, tint_icon
-from winutil import set_round_corners
+from winutil import bring_to_front, set_round_corners
 
 log = logging.getLogger(__name__)
 
@@ -292,6 +293,125 @@ class _FlatButton(tk.Label):
         self.bind("<Leave>", lambda _e: self.configure(bg=self._normal))
 
 
+class _HotkeyEntry(ttk.Entry):
+    """快捷键输入框：点一下进入录制，直接按下组合键就填进去。
+
+    没有用 readonly 状态 —— ttk 在 readonly 下对按键的处理依赖主题，
+    这里改成自己拦下所有按键（返回 "break"），内容只由代码改，
+    行为在各主题下都一样。
+    """
+
+    PLACEHOLDER = "按下快捷键…"
+    HINT_CANCEL = "按 Esc 取消"
+
+    def __init__(self, parent: tk.Misc, value: str, font):
+        self._shown = tk.StringVar(master=parent, value=hotkey_mod.display(value))
+        # 用专用样式（insertwidth=0）：这个框永远不接受直接打字，
+        # 光标闪来闪去反而误导。ttk 没有 insertwidth 选项，只能走 style。
+        super().__init__(parent, style="Hotkey.TEntry", font=font,
+                         textvariable=self._shown, justify="left")
+        self._value = hotkey_mod.normalize(value)
+        self._recording = False
+        self._mods: list[str] = []
+        self._on_change = None
+
+        self.bind("<Button-1>", self._start_recording)
+        self.bind("<KeyPress>", self._on_key_press)
+        self.bind("<KeyRelease>", self._on_key_release)
+        self.bind("<FocusOut>", self._on_focus_out)
+
+    # ---- 和 ttk.Entry 保持同样的接口，_save() 那边不用改 ----
+
+    def get(self) -> str:
+        return self._value
+
+    def set_value(self, combo: str) -> None:
+        self._value = hotkey_mod.normalize(combo)
+        if not self._recording:
+            self._shown.set(hotkey_mod.display(self._value))
+
+    @property
+    def recording(self) -> bool:
+        return self._recording
+
+    # ---- 录制 ----
+
+    def _start_recording(self, _event=None) -> str:
+        self._recording = True
+        self._mods = []
+        self.focus_set()
+        self._render_preview()
+        try:
+            self.configure(foreground=_ACCENT)
+        except tk.TclError:
+            pass
+        return "break"          # 别让 Entry 去定位光标
+
+    def _on_key_press(self, event) -> str:
+        if not self._recording:
+            # 没在录制时也不允许手打，避免和录制逻辑打架
+            return "break"
+
+        if event.keysym in ("Escape", "Esc"):
+            self._cancel()
+            return "break"
+
+        mod = hotkey_mod.keysym_to_modifier(event.keysym)
+        if mod:
+            if mod not in self._mods:
+                self._mods.append(mod)
+            self._render_preview()
+            return "break"
+
+        key = hotkey_mod.keysym_to_name(event.keysym)
+        if not key:
+            return "break"
+
+        combo = hotkey_mod.build_combo(self._mods, key)
+        ok, _reason = hotkey_mod.validate(combo)
+        if not ok:
+            return "break"
+
+        self._value = combo
+        self._finish()
+        if self._on_change is not None:
+            self._on_change(combo)
+        return "break"
+
+    def _on_key_release(self, event) -> str:
+        if not self._recording:
+            return "break"
+        # 松开修饰键时把预览收回去，不然按一下 Ctrl 再松手会一直停在 "Ctrl+…"
+        mod = hotkey_mod.keysym_to_modifier(event.keysym)
+        if mod and mod in self._mods:
+            self._mods.remove(mod)
+            self._render_preview()
+        return "break"
+
+    def _on_focus_out(self, _event=None) -> None:
+        if self._recording:
+            self._cancel()
+
+    def _render_preview(self) -> None:
+        if not self._mods:
+            self._shown.set(self.PLACEHOLDER)
+            return
+        mods = [m.capitalize() for m in hotkey_mod.MODIFIER_ORDER if m in self._mods]
+        self._shown.set("+".join(mods) + "+…")
+
+    def _finish(self) -> None:
+        self._recording = False
+        self._mods = []
+        self._shown.set(hotkey_mod.display(self._value))
+        try:
+            self.configure(foreground=_TEXT)
+        except tk.TclError:
+            pass
+
+    def _cancel(self) -> None:
+        self._finish()          # _value 没被改过，等于恢复原值
+
+
 class SettingsWindow:
     """设置窗口。用 show() 打开，模态。"""
 
@@ -315,6 +435,7 @@ class SettingsWindow:
         self._f_section = tkfont.Font(root=root, family=family, size=10, weight="bold")
         self._f_value = tkfont.Font(root=root, family=family, size=10)
         self._f_title = tkfont.Font(root=root, family=family, size=11)
+        self._f_hint = tkfont.Font(root=root, family=family, size=9)
 
         self.win = tk.Toplevel(root)
         self.win.withdraw()
@@ -361,8 +482,12 @@ class SettingsWindow:
 
         # ---- 快捷键 ----
         self._section(body, "快捷键")
-        self._hotkey = self._field_row(body, "截图翻译", self._cfg.hotkey)
-        self._exit_hotkey = self._field_row(body, "退出程序", self._cfg.exit_hotkey)
+        self._hotkey = self._hotkey_row(body, "截图翻译", self._cfg.hotkey)
+        self._exit_hotkey = self._hotkey_row(body, "退出程序", self._cfg.exit_hotkey)
+        self._hotkey_tip = tk.Label(
+            body, text="点击输入框，然后直接按下想要的组合键；按 Esc 取消",
+            bg=_BG, fg=_TEXT_DIM, font=self._f_hint, anchor="w")
+        self._hotkey_tip.pack(fill="x", pady=(1, 0))
 
         # ---- 底部 ----
         footer = tk.Frame(inner, bg=_BG)
@@ -712,6 +837,17 @@ class SettingsWindow:
         slider._value_label = value_label  # type: ignore[attr-defined]
         return slider
 
+    def _hotkey_row(self, parent: tk.Misc, label: str, value: str) -> "_HotkeyEntry":
+        row = tk.Frame(parent, bg=_BG)
+        row.pack(fill="x", pady=1)
+
+        tk.Label(row, text=label, bg=_BG, fg=_TEXT, font=self._f_label,
+                 width=_LABEL_W, anchor="w").pack(side="left")
+
+        entry = _HotkeyEntry(row, value, self._f_value)
+        entry.pack(side="left", fill="x", expand=True, ipady=2)
+        return entry
+
     def _field_row(self, parent: tk.Misc, label: str, value: str) -> ttk.Entry:
         row = tk.Frame(parent, bg=_BG)
         row.pack(fill="x", pady=1)
@@ -761,6 +897,9 @@ class SettingsWindow:
         self.win.deiconify()
         self.win.lift()
         self.win.focus_force()
+        # 光 focus_force 只改 Tk 内部焦点；不是系统前台窗口就收不到键盘消息，
+        # 快捷键录制会按了没反应
+        bring_to_front(self.win)
         # 先跑完一轮完整布局（update 而不是 update_idletasks），
         # 否则量到的还是映射前的 0 坐标（见 _align_footer_icon）
         self.win.update()
@@ -813,15 +952,39 @@ class SettingsWindow:
         if not self._hint.winfo_ismapped():
             self._hint.pack(pady=(0, 6))
 
+    def _check_hotkeys(self, capture: str, exit_combo: str) -> str:
+        """保存前校验两个快捷键。返回空串表示没问题，否则是给用户看的原因。"""
+        for name, combo in (("截图翻译", capture), ("退出程序", exit_combo)):
+            ok, reason = hotkey_mod.validate(combo)
+            if not ok:
+                return "%s的快捷键不可用：%s" % (name, reason)
+            try:
+                import keyboard
+
+                keyboard.parse_hotkey(combo)
+            except Exception:
+                return "%s的快捷键「%s」无法识别，换一个试试" % (name, combo)
+
+        if hotkey_mod.same(capture, exit_combo):
+            return "两个快捷键不能相同"
+        return ""
+
     def _save(self) -> None:
+        capture = self._hotkey.get().strip()
+        exit_combo = self._exit_hotkey.get().strip()
+        problem = self._check_hotkeys(capture, exit_combo)
+        if problem:
+            self._show_hint(problem)
+            return
+
         cfg = self._cfg
         cfg.mask_opacity = round(float(self._mask.value), 3)
         cfg.overlay_opacity = round(float(self._overlay.value), 3)
         cfg.font_size = int(round(float(self._fontsize.value)))
         self._collect_fields()                 # 接口地址 / Key / 模型收回配置
         cfg.target_language = self._target.get().strip() or cfg.target_language
-        cfg.hotkey = self._hotkey.get().strip() or cfg.hotkey
-        cfg.exit_hotkey = self._exit_hotkey.get().strip() or cfg.exit_hotkey
+        cfg.hotkey = capture
+        cfg.exit_hotkey = exit_combo
 
         self._saved = True
         if self._on_save:
@@ -845,16 +1008,20 @@ def install_styles(root: tk.Misc) -> None:
         style.theme_use("clam")
     except tk.TclError:
         pass
-    style.configure(
-        "Dark.TEntry",
-        fieldbackground=_FIELD, background=_FIELD, foreground=_TEXT,
-        insertcolor=_TEXT, bordercolor=_FIELD_BORDER, lightcolor=_FIELD,
-        darkcolor=_FIELD, borderwidth=1, relief="flat", padding=4,
-    )
-    style.map("Dark.TEntry",
-              bordercolor=[("focus", _ACCENT)],
-              lightcolor=[("focus", _ACCENT)],
-              darkcolor=[("focus", _ACCENT)])
+    for name in ("Dark.TEntry", "Hotkey.TEntry"):
+        style.configure(
+            name,
+            fieldbackground=_FIELD, background=_FIELD, foreground=_TEXT,
+            insertcolor=_TEXT, bordercolor=_FIELD_BORDER, lightcolor=_FIELD,
+            darkcolor=_FIELD, borderwidth=1, relief="flat", padding=4,
+        )
+        style.map(name,
+                  bordercolor=[("focus", _ACCENT)],
+                  lightcolor=[("focus", _ACCENT)],
+                  darkcolor=[("focus", _ACCENT)])
+
+    # 快捷键录制框不给文本光标：它不接受直接输入
+    style.configure("Hotkey.TEntry", insertwidth=0)
 
 
 def open_settings(root: tk.Misc, cfg: Config, on_save=None) -> bool:

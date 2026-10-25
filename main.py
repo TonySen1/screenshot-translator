@@ -173,16 +173,28 @@ class App:
 
     # ---------- 快捷键 ----------
 
-    def _register_hotkeys(self) -> None:
+    def _unregister_hotkeys(self) -> None:
+        """摘掉所有全局热键。
+
+        设置窗口里录制快捷键时必须先摘：截图热键是 suppress=True 注册的，
+        会把按键从系统事件里吞掉，Tk 的输入框根本收不到 KeyPress。
+        """
+        if not self._hotkey_handles:
+            return
         import keyboard
 
-        # 重新注册前先摘掉旧的（设置窗口改完快捷键会再走一次这里）
         for handle in self._hotkey_handles:
             try:
                 keyboard.remove_hotkey(handle)
             except Exception:
                 pass
         self._hotkey_handles.clear()
+
+    def _register_hotkeys(self) -> None:
+        import keyboard
+
+        # 重新注册前先摘掉旧的（设置窗口改完快捷键会再走一次这里）
+        self._unregister_hotkeys()
 
         def add(combo: str, event: str, suppress: bool) -> bool:
             try:
@@ -230,10 +242,12 @@ class App:
                 self.mask = None
             self._sync_escape_hook()
 
+            # 让设置窗口里的快捷键录制能收到真实按键
+            self._unregister_hotkeys()
+
             def on_save(new_cfg) -> None:
                 config_module.save_config(new_cfg)
                 self.cfg = new_cfg
-                self._register_hotkeys()
                 if self.tray is not None:
                     self.tray.update_title(self.cfg.hotkey)
                 log.info("设置已更新：model=%s 遮罩=%.2f 浮层=%.2f 字号=%d",
@@ -245,6 +259,8 @@ class App:
             log.exception("设置窗口异常")
         finally:
             self.settings_open = False
+            # 不管有没有保存，都按当前配置把全局热键装回去
+            self._register_hotkeys()
             self._sync_escape_hook()
 
     def _sync_escape_hook(self) -> None:

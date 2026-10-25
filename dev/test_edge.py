@@ -124,11 +124,22 @@ def launch():
     return p
 
 
+def cursor_pos():
+    pt = ctypes.wintypes.POINT()
+    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+    return pt.x, pt.y
+
+
 def drag(x0, y0, x1, y1):
-    move(x0, y0)
-    time.sleep(0.35)
-    move(x0, y0)   # 再发一次，确保按下时鼠标坐标已经生效
-    time.sleep(0.12)
+    # 合成鼠标事件存在竞争：SetCursorPos 之后立刻按下时，Tk 收到的按下坐标
+    # 可能还是旧位置，于是"原地点击"会被判成大选区。这里确认光标到位再按。
+    target = (int(x0), int(y0))
+    for _ in range(10):
+        move(x0, y0)
+        time.sleep(0.05)
+        if cursor_pos() == target:
+            break
+    time.sleep(0.15)
     ctypes.windll.user32.mouse_event(0x0002, 0, 0, 0, 0)
     for i in range(1, 9):
         move(x0 + (x1 - x0) * i // 8, y0 + (y1 - y0) * i // 8)
