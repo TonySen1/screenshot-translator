@@ -41,6 +41,10 @@ void hotkey_unregister_all(HWND hwnd);
 void hotkey_suspend(HWND hwnd);
 void hotkey_resume(HWND hwnd);
 
+/* 清掉队列里已投递但未处理的 WM_HOTKEY。
+   注销热键不会撤销已经入队的消息，需要显式丢弃。 */
+void hotkey_drain_pending(HWND hwnd);
+
 /* 丢弃暂停时记住的组合（不清除暂停标志）。
    用于"保存了新配置、准备按新配置重新注册"的场景，
    避免 resume 先把旧组合注册回去。 */

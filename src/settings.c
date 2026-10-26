@@ -300,6 +300,9 @@ static void stop_recording(void)
     g_st.recording_id = 0;
     SetDlgItemTextW(g_st.hwnd, IDC_LBL_HINT,
                     L"格式如 ctrl+alt+d。点击输入框后直接按组合键即可录制。");
+
+    /* 录制过程中按下的组合也可能已入队，收尾时再清一次 */
+    hotkey_drain_pending(g_app.hwnd);
 }
 
 /* 把当前按下的键转成 "ctrl+alt+d"；返回 FALSE 表示还不构成完整组合。

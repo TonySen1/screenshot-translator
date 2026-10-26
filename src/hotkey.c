@@ -347,6 +347,21 @@ void hotkey_abandon_suspend(void)
     g_suspended = FALSE;
 }
 
+/* 清掉消息队列里已经投递、但还没处理的 WM_HOTKEY。
+   场景：用户按下的组合正好是当前热键，RegisterHotKey 已经把它
+   塞进队列；此时注销热键并不会撤销那条已入队的消息，
+   内层消息循环取到它就会再弹一次截图遮罩。 */
+void hotkey_drain_pending(HWND hwnd)
+{
+    if (hwnd == NULL) return;
+
+    MSG msg;
+    /* PM_REMOVE 会把消息从队列里拿走；不是 WM_HOTKEY 的放回去 */
+    while (PeekMessageW(&msg, hwnd, WM_HOTKEY, WM_HOTKEY, PM_REMOVE)) {
+        LOG_INFO("hotkey", L"丢弃队列里残留的热键消息 id=%d", (int)msg.wParam);
+    }
+}
+
 void hotkey_resume(HWND hwnd)
 {
     if (hwnd == NULL || !g_suspended) return;
