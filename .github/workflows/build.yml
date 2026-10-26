@@ -10,96 +10,96 @@ on:
 permissions:
   contents: write
 
-env:
-  PYTHONIOENCODING: utf-8
-
 jobs:
 
-  test:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-          cache: pip
-
-      - name: 安装依赖
-        run: pip install -r requirements.txt
-
-      - name: 冒烟测试（所有模块能正常导入）
-        run: |
-          python -c "import config, icons, winutil, screenshot, translator, overlay, tray, settings_window, main; print('所有模块导入成功')"
-
-      - name: 快捷键解析测试（不碰 Tk 窗口）
-        run: python dev/test_hotkey.py --parsing-only
-
-      - name: 翻译链路测试（对着本地 mock 服务跑，不联网）
-        run: python dev/test_translator.py
-
-      - name: 配置读写测试
-        run: |
-          python -c "
-          import json, os, tempfile
-          import config as c
-          d = tempfile.mkdtemp()
-          p = os.path.join(d, 'config.json')
-          cfg = c.load_config(p)
-          assert os.path.exists(p), '没有自动生成配置文件'
-          cfg.font_size = 21
-          cfg.api_key = 'sk-ci-test'
-          assert c.save_config(cfg, p), '保存失败'
-          back = c.load_config(p)
-          assert back.font_size == 21 and back.api_key == 'sk-ci-test', '读回来不一致'
-          raw = json.load(open(p, encoding='utf-8'))
-          assert '_说明' in raw, '保存时把说明字段弄丢了'
-          print('配置读写正常')
-          "
-
-      # 这两套都不需要显示器：拿不到时脚本会自己跳过窗口相关的检查
-      - name: 仓库图标测试
-        run: python dev/test_repo_icon.py
-
-      - name: 模型列表测试
-        run: python dev/test_model_list.py
-
   build:
-    needs: test
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v7
-        with:
-          python-version: '3.12'
-          cache: pip
+      # windows-latest 自带 Visual Studio，用 vswhere 定位并加载 MSVC 环境
+      - name: 配置 MSVC 环境
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere not found" }
+          $vs = & $vswhere -latest -products * `
+                  -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                  -property installationPath
+          if (-not $vs) { throw "MSVC toolset not found" }
+          Write-Output "VS: $vs"
+          "VCVARS=$vs\VC\Auxiliary\Build\vcvars64.bat" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: 安装依赖
-        run: pip install -r requirements.txt
+      - name: 编译
+        shell: cmd
+        run: |
+          call "%VCVARS%" >nul
+          if errorlevel 1 exit /b 1
+          if not exist build mkdir build
+          rc /nologo /fo build\app.res src\resource.rc
+          if errorlevel 1 exit /b 1
+          cl /nologo /c /std:c11 /utf-8 /W4 /O2 /MT /GS- /Gy ^
+             /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+             /Ithird_party /Fo:build\ ^
+             src\*.c third_party\cJSON.c
+          if errorlevel 1 exit /b 1
+          cl /nologo /c /std:c++17 /utf-8 /W4 /O2 /MT /GS- /Gy ^
+             /DUNICODE /D_UNICODE /DWIN32_LEAN_AND_MEAN /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS ^
+             /Ithird_party /Fo:build\ ^
+             src\*.cpp
+          if errorlevel 1 exit /b 1
+          link /nologo /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup ^
+               /OPT:REF /OPT:ICF /INCREMENTAL:NO ^
+               /OUT:build\screenshot-translator.exe ^
+               build\*.obj build\app.res ^
+               user32.lib gdi32.lib msimg32.lib gdiplus.lib winhttp.lib ^
+               comctl32.lib shell32.lib dwmapi.lib shcore.lib advapi32.lib ole32.lib
+          if errorlevel 1 exit /b 1
 
-      - name: 打包
-        run: python build.py
+      - name: 验证只依赖系统 DLL
+        shell: pwsh
+        run: |
+          $dumpbin = Get-ChildItem "${env:VCVARS}\..\..\..\..\bin\Hostx64\x64\dumpbin.exe" -ErrorAction SilentlyContinue
+          if (-not $dumpbin) {
+            $dumpbin = Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue |
+                       Where-Object { $_.FullName -like '*Hostx64\x64*' } | Select-Object -First 1
+          }
+          if (-not $dumpbin) { throw "dumpbin not found" }
+          $out = & $dumpbin.FullName /nologo /dependents build\screenshot-translator.exe
+          $out | Write-Output
+          if ($out -match 'MSVCR') { throw "动态链接了 CRT，应该用 /MT" }
 
+      - name: 记录产物体积
+        shell: pwsh
+        run: |
+          $f = Get-Item build\screenshot-translator.exe
+          Write-Output ("size = {0:N0} bytes ({1:N1} KB)" -f $f.Length, ($f.Length/1KB))
+          "ARTIFACT_SIZE=$($f.Length)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: 准备发布用的文件名
         shell: pwsh
-        run: |
-          $exe = Get-ChildItem dist -Filter *.exe | Select-Object -First 1
-          Copy-Item -LiteralPath $exe.FullName -Destination "dist/ScreenshotTranslator.exe"
+        run: Copy-Item build\screenshot-translator.exe build\ScreenshotTranslator.exe
 
-      - name: 上传构建产物
-        uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@v4
         with:
           name: screenshot-translator-windows
-          path: dist/*.exe
+          path: build\ScreenshotTranslator.exe
           if-no-files-found: error
 
-      # 抽不到对应版本就跳过（continue-on-error），下面会退回 --generate-notes
+      # 抽不到对应版本就跳过，下面会退回 --generate-notes
       - name: 从 CHANGELOG 生成 Release 说明
         if: startsWith(github.ref, 'refs/tags/v')
         continue-on-error: true
-        run: python dev/release_notes.py "${{ github.ref_name }}" release-notes.md
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $lines = Get-Content CHANGELOG.md -Encoding utf8
+          $start = ($lines | Select-String -SimpleMatch "## $tag " | Select-Object -First 1).LineNumber
+          if (-not $start) { exit 1 }
+          $rest = $lines[$start..($lines.Count-1)]
+          $next = ($rest[1..($rest.Count-1)] | Select-String -Pattern '^## v' | Select-Object -First 1).LineNumber
+          if ($next) { $body = $rest[0..($next)] } else { $body = $rest }
+          $body -join "`n" | Out-File release-notes.md -Encoding utf8
 
       - name: 打了 v 开头的 tag 就自动发 Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -107,16 +107,13 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 说明优先用 CHANGELOG 里那一节：本仓库一直是直接往 main 提交、不走 PR，
-          # 而 --generate-notes 是按 PR 标题生成的，只会吐一行 Full Changelog 链接。
           $tag = "${{ github.ref_name }}"
           if (Test-Path release-notes.md) {
-            gh release create $tag dist/ScreenshotTranslator.exe --title $tag --notes-file release-notes.md
+            gh release create $tag build\ScreenshotTranslator.exe --title $tag --notes-file release-notes.md
           } else {
-            gh release create $tag dist/ScreenshotTranslator.exe --title $tag --generate-notes
+            gh release create $tag build\ScreenshotTranslator.exe --title $tag --generate-notes
           }
-          # 幂等：tag 被重建过（补示例图、补测试脚本这类）时 Release 已经存在，
-          # gh release create 会直接报错退出。这时改成覆盖已有 Release 的附件。
+          # 幂等：tag 重建过时 Release 已存在，改成覆盖附件
           if ($LASTEXITCODE -ne 0) {
-            gh release upload $tag dist/ScreenshotTranslator.exe --clobber
+            gh release upload $tag build\ScreenshotTranslator.exe --clobber
           }
