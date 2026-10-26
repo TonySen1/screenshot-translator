@@ -197,6 +197,21 @@ class App:
                 pass
         self._hotkey_handles.clear()
 
+        # remove_hotkey 内部是「先减修饰键计数器、再从 handler 列表里删」，
+        # 中间任何一步失败（列表里没有这个 handler、并发修改等）都会让
+        # filtered_modifiers 偏高，而且没有任何报错。计数器一高，Ctrl/Alt
+        # 就会被当成"要过滤的修饰键"，热键从此完全匹配不上 —— 这正是
+        # 打开设置窗口再关掉之后快捷键失灵的原因。
+        # 这里直接把这几个容器清空：调用方马上会按配置重新注册全部热键。
+        try:
+            listener = keyboard._listener
+            listener.blocking_hotkeys.clear()
+            listener.nonblocking_hotkeys.clear()
+            listener.filtered_modifiers.clear()
+            getattr(keyboard, "_hotkeys", {}).clear()
+        except Exception:
+            log.debug("清理 keyboard 内部热键状态失败", exc_info=True)
+
     def _register_hotkeys(self) -> None:
         import keyboard
 
@@ -233,6 +248,20 @@ class App:
             add("esc", EVENT_ESCAPE, suppress=False)
 
         self._start_watchdog()
+        self._log_hotkey_state()
+
+    def _log_hotkey_state(self) -> None:
+        """把 keyboard 的内部状态记一条日志，出问题时能直接看出异常。"""
+        import keyboard
+
+        try:
+            listener = keyboard._listener
+            filtered = {k: v for k, v in listener.filtered_modifiers.items() if v}
+            log.info("热键状态：句柄=%d 修饰键计数=%s 阻塞热键=%d",
+                     len(self._hotkey_handles), filtered,
+                     sum(len(v) for v in listener.blocking_hotkeys.values()))
+        except Exception:
+            log.debug("读取热键内部状态失败", exc_info=True)
 
     def _uses_escape(self) -> bool:
         for combo in (self.cfg.hotkey, self.cfg.exit_hotkey):

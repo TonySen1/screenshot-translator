@@ -99,6 +99,16 @@ def main() -> int:
         check("反复开关遮罩不改变热键数量", len(app._hotkey_handles) == before,
               "%d -> %d" % (before, len(app._hotkey_handles)))
 
+        # ---- 修饰键计数器泄漏能被清掉 ----
+        import keyboard
+        keyboard._listener.filtered_modifiers[29] = 500
+        app._register_hotkeys()
+        leaked = keyboard._listener.filtered_modifiers.get(29, 0)
+        check("重新注册会清掉泄漏的修饰键计数", leaked < 100,
+              "ctrl 计数 = %d" % leaked)
+        check("重新注册后热键数量正确", len(app._hotkey_handles) == 3,
+              "%d 个" % len(app._hotkey_handles))
+
         # ---- 监听线程健康检查 ----
         import keyboard
         recovered = []
