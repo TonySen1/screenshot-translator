@@ -10,6 +10,8 @@
  */
 #include "settings.h"
 #include "app.h"
+#include "deepl.h"
+#include "providers.h"
 #include "hotkey.h"
 #include "overlay_gdiplus.h"
 #include "translator.h"
@@ -26,16 +28,8 @@
 
 /* 控件 ID */
 enum {
-    IDC_LBL_MASK = 100,
-    IDC_SLD_MASK,
-    IDC_VAL_MASK,
-    IDC_LBL_OVERLAY,
-    IDC_SLD_OVERLAY,
-    IDC_VAL_OVERLAY,
-    IDC_LBL_FONT,
-    IDC_SLD_FONT,
-    IDC_VAL_FONT,
-
+    IDC_LBL_PROVIDER,
+    IDC_COMBO_PROVIDER,
     IDC_LBL_BASE,
     IDC_EDIT_BASE,
     IDC_LBL_KEY,
@@ -55,7 +49,10 @@ enum {
     IDC_LBL_STATUS,
     IDC_BTN_TEST,
     IDC_BTN_SAVE,
-    IDC_BTN_CANCEL
+    IDC_BTN_CANCEL,
+    IDC_LBL_DEEPL_KEY,
+    IDC_EDIT_DEEPL_KEY,
+    IDC_BTN_DEEPL_TEST
 };
 
 /* 工作线程 -> 窗口的私有消息 */
@@ -64,6 +61,7 @@ enum {
 #define NET_NONE     0
 #define NET_TEST     1
 #define NET_MODELS   2
+#define NET_DEEPL    3
 
 typedef struct NetJob {
     int        kind;
@@ -199,27 +197,6 @@ static BOOL read_trimmed(int id, wchar_t *buffer, size_t count)
     return buffer[0] != 0;
 }
 
-/* ---------- 外观滑块 ---------- */
-
-static void update_slider_values(void)
-{
-    wchar_t text[32];
-
-    int mask = (int)SendDlgItemMessageW(g_st.hwnd, IDC_SLD_MASK,
-                                        TBM_GETPOS, 0, 0);
-    _snwprintf_s(text, 32, _TRUNCATE, L"%d%%", mask);
-    SetDlgItemTextW(g_st.hwnd, IDC_VAL_MASK, text);
-
-    int overlay = (int)SendDlgItemMessageW(g_st.hwnd, IDC_SLD_OVERLAY,
-                                           TBM_GETPOS, 0, 0);
-    _snwprintf_s(text, 32, _TRUNCATE, L"%d%%", overlay);
-    SetDlgItemTextW(g_st.hwnd, IDC_VAL_OVERLAY, text);
-
-    int font = (int)SendDlgItemMessageW(g_st.hwnd, IDC_SLD_FONT,
-                                        TBM_GETPOS, 0, 0);
-    _snwprintf_s(text, 32, _TRUNCATE, L"%d", font);
-    SetDlgItemTextW(g_st.hwnd, IDC_VAL_FONT, text);
-}
 
 /* ---------- 快捷键录制 ---------- */
 
@@ -341,6 +318,8 @@ static DWORD WINAPI net_thread(LPVOID param)
             translator_fetch_models(job->base_url, job->api_key,
                                     job->timeout_sec,
                                     &result->text, &result->error);
+        } else if (job->kind == NET_DEEPL) {
+            result->error = deepl_test_connection(job->api_key, job->timeout_sec);
         } else {
             result->error = translator_test_connection(job->base_url, job->api_key,
                                                        job->model,
@@ -365,31 +344,35 @@ static void start_net_job(int kind)
         return;
     }
 
-    wchar_t base[512], key[512], model[128];
-
-    if (!read_trimmed(IDC_EDIT_BASE, base, 512)) {
-        set_status(L"请先填写 API 地址");
-        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_BASE));
-        return;
-    }
-    if (_wcsnicmp(base, L"http://", 7) != 0 &&
-        _wcsnicmp(base, L"https://", 8) != 0) {
-        set_status(L"API 地址必须以 http:// 或 https:// 开头");
-        return;
-    }
-
-    read_trimmed(IDC_EDIT_KEY, key, 512);
-    read_trimmed(IDC_EDIT_MODEL, model, 128);
-
-    if (kind == NET_TEST && key[0] == 0) {
-        set_status(L"请先填写 API Key");
-        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_KEY));
-        return;
-    }
-    if (kind == NET_TEST && model[0] == 0) {
-        set_status(L"请先填写模型名");
-        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_MODEL));
-        return;
+    wchar_t base[512] = L"", key[512] = L"", model[128] = L"";
+    if (kind == NET_DEEPL) {
+        if (!read_trimmed(IDC_EDIT_DEEPL_KEY, key, 512) || !deepl_key_is_valid(key)) {
+            set_status(L"请粘贴有效的 DeepL 密钥（不含空格）");
+            SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_DEEPL_KEY));
+            return;
+        }
+    } else {
+        if (!read_trimmed(IDC_EDIT_BASE, base, 512)) {
+            set_status(L"请先填写 OpenAI 接口地址");
+            SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_BASE));
+            return;
+        }
+        if (_wcsnicmp(base, L"http://", 7) != 0 && _wcsnicmp(base, L"https://", 8) != 0) {
+            set_status(L"API 地址必须以 http:// 或 https:// 开头");
+            return;
+        }
+        read_trimmed(IDC_EDIT_KEY, key, 512);
+        read_trimmed(IDC_EDIT_MODEL, model, 128);
+        if (kind == NET_TEST && !key[0]) {
+            set_status(L"请先填写 OpenAI API Key");
+            SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_KEY));
+            return;
+        }
+        if (kind == NET_TEST && !model[0]) {
+            set_status(L"请先填写模型名");
+            SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_MODEL));
+            return;
+        }
     }
 
     NetJob *job = (NetJob *)heap_alloc(sizeof(*job));
@@ -428,7 +411,9 @@ static void start_net_job(int kind)
 
     EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_TEST), FALSE);
     EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_MODELS), FALSE);
-    set_status(kind == NET_TEST ? L"正在测试连接…" : L"正在拉取模型列表…");
+    EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_DEEPL_TEST), FALSE);
+    set_status(kind == NET_DEEPL ? L"正在测试 DeepL 连接…" :
+               kind == NET_TEST ? L"正在测试 OpenAI 连接…" : L"正在拉取模型列表…");
 }
 
 /* 工作线程把结果送回来 */
@@ -443,6 +428,7 @@ static void on_net_done(NetResult *result)
     if (g_st.hwnd != NULL) {
         EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_TEST), TRUE);
         EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_MODELS), TRUE);
+        EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_DEEPL_TEST), TRUE);
     }
 
     if (result == NULL) {
@@ -453,8 +439,8 @@ static void on_net_done(NetResult *result)
     if (result->error != NULL) {
         set_status(result->error);
         LOG_WARN("settings", L"网络操作失败：%ls", result->error);
-    } else if (result->kind == NET_TEST) {
-        set_status(L"连接成功，配置可用");
+    } else if (result->kind == NET_TEST || result->kind == NET_DEEPL) {
+        set_status(result->kind == NET_DEEPL ? L"DeepL 连接成功，密钥可用" : L"OpenAI 连接成功，配置可用");
     } else {
         /* 模型列表：拿第一条填进模型框，其余弹窗让用户选 */
         wchar_t *first = result->text;
@@ -524,12 +510,64 @@ static void commit_recorded_hotkey(const wchar_t *combo)
 
 /* ---------- 校验与保存 ---------- */
 
+static const wchar_t *provider_id_from_index(int index)
+{
+    static const wchar_t *const ids[] = {
+        TRANSLATION_PROVIDER_DEEPL, TRANSLATION_PROVIDER_OPENAI,
+        TRANSLATION_PROVIDER_GOOGLE, TRANSLATION_PROVIDER_TENCENT,
+        TRANSLATION_PROVIDER_BING, TRANSLATION_PROVIDER_MS,
+        TRANSLATION_PROVIDER_YOUDAO, TRANSLATION_PROVIDER_YANDEX
+    };
+    return (index >= 0 && index < (int)(sizeof(ids) / sizeof(ids[0])))
+           ? ids[index] : NULL;
+}
+
+static void update_provider_label(void)
+{
+    int index = (int)SendDlgItemMessageW(g_st.hwnd, IDC_COMBO_PROVIDER,
+                                         CB_GETCURSEL, 0, 0);
+    const wchar_t *label = L"服务密钥";
+    switch (index) {
+    case 0: label = L"DeepL 密钥"; break;
+    case 1: label = L"OpenAI 密钥"; break;
+    case 2: label = L"Google Web"; break;
+    case 3: label = L"腾讯 TranSmart"; break;
+    case 4: label = L"Bing 网页"; break;
+    case 5: label = L"Microsoft"; break;
+    case 6: label = L"有道网页"; break;
+    case 7: label = L"Yandex"; break;
+    default: break;
+    }
+    SetDlgItemTextW(g_st.hwnd, IDC_LBL_DEEPL_KEY, label);
+}
+
 static BOOL validate_and_save(void)
 {
     /* 保存前必须先退出录制，否则热键还处于暂停状态 */
     stop_recording();
 
     wchar_t base[512], key[512], model[128], hotkey[64], exitkey[64], lang[64];
+    wchar_t deepl_key[512];
+    int provider_index = (int)SendDlgItemMessageW(g_st.hwnd, IDC_COMBO_PROVIDER, CB_GETCURSEL, 0, 0);
+    const wchar_t *provider = provider_id_from_index(provider_index);
+    if (!provider) {
+        set_status(L"请选择翻译服务");
+        return FALSE;
+    }
+    if (!wstr_ieq(provider, TRANSLATION_PROVIDER_DEEPL) &&
+        !wstr_ieq(provider, TRANSLATION_PROVIDER_OPENAI) &&
+        !wstr_ieq(provider, TRANSLATION_PROVIDER_GOOGLE)) {
+        wchar_t *unavailable = provider_unavailable_error(provider);
+        set_status(unavailable ? unavailable : L"该翻译服务暂不可用");
+        heap_free(unavailable);
+        return FALSE;
+    }
+    read_trimmed(IDC_EDIT_DEEPL_KEY, deepl_key, 512);
+    if (*deepl_key && !deepl_key_is_valid(deepl_key)) {
+        set_status(L"DeepL 密钥包含无效字符，请重新粘贴");
+        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_DEEPL_KEY));
+        return FALSE;
+    }
 
     if (!read_trimmed(IDC_EDIT_BASE, base, 512)) {
         set_status(L"API 地址不能为空");
@@ -554,6 +592,13 @@ static BOOL validate_and_save(void)
     read_trimmed(IDC_EDIT_LANG, lang, 64);
     if (lang[0] == 0) {
         set_status(L"目标语言不能为空");
+        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_LANG));
+        return FALSE;
+    }
+    char deepl_lang[DEEPL_TARGET_CAPACITY];
+    if (wstr_ieq(provider, TRANSLATION_PROVIDER_DEEPL) &&
+        *deepl_key && !deepl_target_language(lang, deepl_lang)) {
+        set_status(L"DeepL 目标语言请填中文或语言代码，如 ZH-HANS");
         SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_LANG));
         return FALSE;
     }
@@ -618,23 +663,12 @@ static BOOL validate_and_save(void)
     /* 写进编辑副本 */
     wstr_copy(g_st.edited.api_base_url, 512, base);
     wstr_copy(g_st.edited.api_key,      512, key);
+    wstr_copy(g_st.edited.deepl_api_key, 512, deepl_key);
     wstr_copy(g_st.edited.model,        128, model);
     wstr_copy(g_st.edited.target_language, 64, lang);
     wstr_copy(g_st.edited.hotkey,        64, hotkey);
     wstr_copy(g_st.edited.exit_hotkey,   64, exitkey);
-
-    g_st.edited.mask_opacity =
-        (float)SendDlgItemMessageW(g_st.hwnd, IDC_SLD_MASK, TBM_GETPOS, 0, 0) / 100.0f;
-    g_st.edited.overlay_opacity =
-        (float)SendDlgItemMessageW(g_st.hwnd, IDC_SLD_OVERLAY, TBM_GETPOS, 0, 0) / 100.0f;
-    g_st.edited.font_size =
-        (int)SendDlgItemMessageW(g_st.hwnd, IDC_SLD_FONT, TBM_GETPOS, 0, 0);
-
-    /* 兜住范围，和 config_load 的钳制保持一致 */
-    if (g_st.edited.mask_opacity < 0.05f) g_st.edited.mask_opacity = 0.05f;
-    if (g_st.edited.overlay_opacity < 0.30f) g_st.edited.overlay_opacity = 0.30f;
-    if (g_st.edited.font_size < 8)  g_st.edited.font_size = 8;
-    if (g_st.edited.font_size > 40) g_st.edited.font_size = 40;
+    wstr_copy(g_st.edited.translation_provider, 32, provider);
 
     if (!config_save(&g_st.edited, g_app.config_path)) {
         set_status(L"保存失败，详情见日志文件");
@@ -645,8 +679,6 @@ static BOOL validate_and_save(void)
     return TRUE;
 }
 
-/* ---------- 布局 ---------- */
-
 static void build_layout(HWND hwnd)
 {
     const int pad     = scale(10);
@@ -656,87 +688,47 @@ static void build_layout(HWND hwnd)
     const int line_h  = scale(15);
     const int label_w = scale(76);
     const int edit_w  = scale(320);
-    const int btn_w   = scale(76);
+    const int btn_w   = scale(82);
     const int btn_h   = scale(24);
-    const int val_w   = scale(42);
 
     int x_left  = pad;
     int x_field = pad + label_w + scale(8);
     int y       = pad;
 
-    /* 外观分组 */
-    add_control(hwnd, L"STATIC", L"外观", SS_LEFT,
-                x_left, y, scale(200), line_h, IDC_LBL_MASK);
-    y += group;
-
-    {
-        int sld_x = x_field;
-        int sld_w = edit_w - val_w - gap;
-
-        add_control(hwnd, L"STATIC", L"截图遮罩透明度", SS_LEFT,
-                    x_left, y + scale(4), label_w, line_h, 0);
-        add_control(hwnd, L"msctls_trackbar32", L"",
-                    WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS | TBS_NOTHUMB * 0,
-                    sld_x, y, sld_w, scale(20), IDC_SLD_MASK);
-        SendDlgItemMessageW(hwnd, IDC_SLD_MASK, TBM_SETRANGE, TRUE,
-                            MAKELPARAM(5, 100));
-        SendDlgItemMessageW(hwnd, IDC_SLD_MASK, TBM_SETTICFREQ, 25, 0);
-        add_control(hwnd, L"STATIC", L"", SS_RIGHT,
-                    sld_x + sld_w + gap, y + scale(4), val_w, line_h, IDC_VAL_MASK);
-        y += scale(20) + gap;
-    }
-
-    {
-        int sld_x = x_field;
-        int sld_w = edit_w - val_w - gap;
-
-        add_control(hwnd, L"STATIC", L"译文背景透明度", SS_LEFT,
-                    x_left, y + scale(4), label_w, line_h, 0);
-        add_control(hwnd, L"msctls_trackbar32", L"",
-                    WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
-                    sld_x, y, sld_w, scale(20), IDC_SLD_OVERLAY);
-        SendDlgItemMessageW(hwnd, IDC_SLD_OVERLAY, TBM_SETRANGE, TRUE,
-                            MAKELPARAM(30, 100));
-        SendDlgItemMessageW(hwnd, IDC_SLD_OVERLAY, TBM_SETTICFREQ, 25, 0);
-        add_control(hwnd, L"STATIC", L"", SS_RIGHT,
-                    sld_x + sld_w + gap, y + scale(4), val_w, line_h, IDC_VAL_OVERLAY);
-        y += scale(20) + gap;
-    }
-
-    {
-        int sld_x = x_field;
-        int sld_w = edit_w - val_w - gap;
-
-        add_control(hwnd, L"STATIC", L"译文字号", SS_LEFT,
-                    x_left, y + scale(4), label_w, line_h, 0);
-        add_control(hwnd, L"msctls_trackbar32", L"",
-                    WS_TABSTOP | TBS_HORZ | TBS_AUTOTICKS,
-                    sld_x, y, sld_w, scale(20), IDC_SLD_FONT);
-        SendDlgItemMessageW(hwnd, IDC_SLD_FONT, TBM_SETRANGE, TRUE,
-                            MAKELPARAM(8, 40));
-        SendDlgItemMessageW(hwnd, IDC_SLD_FONT, TBM_SETTICFREQ, 4, 0);
-        add_control(hwnd, L"STATIC", L"", SS_RIGHT,
-                    sld_x + sld_w + gap, y + scale(4), val_w, line_h, IDC_VAL_FONT);
-        y += scale(20) + gap + scale(2);
-    }
 
     /* 翻译服务分组 */
     add_control(hwnd, L"STATIC", L"翻译服务", SS_LEFT,
                 x_left, y, scale(200), line_h, 0);
+    y += group + gap;
 
-    add_control(hwnd, L"BUTTON", L"测试服务",
-                WS_TABSTOP | BS_PUSHBUTTON,
-                x_field + edit_w - btn_w, y - scale(3), btn_w, btn_h, IDC_BTN_TEST);
-    y += group + scale(2);
+    add_control(hwnd, L"STATIC", L"提供商", SS_LEFT,
+                x_left, y + scale(4), label_w, line_h, IDC_LBL_PROVIDER);
+    HWND provider_combo = add_control(hwnd, L"COMBOBOX", L"",
+                WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+                x_field, y, edit_w, row, IDC_COMBO_PROVIDER);
+    if (provider_combo != NULL) {
+        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"DeepL（需密钥）");
+        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"OpenAI 兼容（需密钥）");
+        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"Google Web（免密钥）");
+        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"腾讯 TranSmart（暂不可用）");
+        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"Bing 网页（暂不可用）");
+        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"Microsoft Android（暂不可用）");
+        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"有道网页（暂不可用）");
+        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"Yandex 网页（暂不可用）");
+    }
+    y += row + gap;
 
-    add_control(hwnd, L"STATIC", L"接口地址", SS_LEFT,
+    add_control(hwnd, L"STATIC", L"OpenAI 地址", SS_LEFT,
                 x_left, y + scale(4), label_w, line_h, IDC_LBL_BASE);
     add_control(hwnd, L"EDIT", L"",
                 WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
-                x_field, y, edit_w, row, IDC_EDIT_BASE);
+                x_field, y, edit_w - btn_w - gap, row, IDC_EDIT_BASE);
+    add_control(hwnd, L"BUTTON", L"测试连接",
+                WS_TABSTOP | BS_PUSHBUTTON,
+                x_field + edit_w - btn_w, y, btn_w, row, IDC_BTN_TEST);
     y += row + gap;
 
-    add_control(hwnd, L"STATIC", L"API Key", SS_LEFT,
+    add_control(hwnd, L"STATIC", L"OpenAI 密钥", SS_LEFT,
                 x_left, y + scale(4), label_w, line_h, IDC_LBL_KEY);
     add_control(hwnd, L"EDIT", L"",
                 WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD,
@@ -752,6 +744,18 @@ static void build_layout(HWND hwnd)
                 WS_TABSTOP | BS_PUSHBUTTON,
                 x_field + edit_w - btn_w, y, btn_w, row, IDC_BTN_MODELS);
     y += row + gap;
+
+    add_control(hwnd, L"STATIC", L"DeepL 密钥", SS_LEFT,
+                x_left, y + scale(4), label_w, line_h, IDC_LBL_DEEPL_KEY);
+    add_control(hwnd, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD,
+                x_field, y, edit_w - btn_w - gap, row, IDC_EDIT_DEEPL_KEY);
+    SendDlgItemMessageW(hwnd, IDC_EDIT_DEEPL_KEY, EM_SETLIMITTEXT, 511, 0);
+    add_control(hwnd, L"BUTTON", L"测试连接", WS_TABSTOP | BS_PUSHBUTTON,
+                x_field + edit_w - btn_w, y, btn_w, row, IDC_BTN_DEEPL_TEST);
+    y += row + gap;
+    add_control(hwnd, L"STATIC", L"失败不会自动切换；DeepL / OpenAI 需配置各自密钥。", SS_LEFT,
+                x_field, y, edit_w, line_h, 0);
+    y += line_h + gap;
 
     add_control(hwnd, L"STATIC", L"目标语言", SS_LEFT,
                 x_left, y + scale(4), label_w, line_h, IDC_LBL_LANG);
@@ -854,24 +858,32 @@ static void center_window(HWND hwnd, HWND owner)
                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+static int provider_combo_index(const wchar_t *provider)
+{
+    if (wstr_ieq(provider, TRANSLATION_PROVIDER_DEEPL)) return 0;
+    if (wstr_ieq(provider, TRANSLATION_PROVIDER_OPENAI)) return 1;
+    if (wstr_ieq(provider, TRANSLATION_PROVIDER_GOOGLE)) return 2;
+    if (wstr_ieq(provider, TRANSLATION_PROVIDER_TENCENT)) return 3;
+    if (wstr_ieq(provider, TRANSLATION_PROVIDER_BING)) return 4;
+    if (wstr_ieq(provider, TRANSLATION_PROVIDER_MS)) return 5;
+    if (wstr_ieq(provider, TRANSLATION_PROVIDER_YOUDAO)) return 6;
+    if (wstr_ieq(provider, TRANSLATION_PROVIDER_YANDEX)) return 7;
+    return 1;
+}
+
 /* 从当前配置填充控件 */
 static void fill_controls(const Config *cfg)
 {
     SetDlgItemTextW(g_st.hwnd, IDC_EDIT_BASE,    cfg->api_base_url);
     SetDlgItemTextW(g_st.hwnd, IDC_EDIT_KEY,     cfg->api_key);
+    SetDlgItemTextW(g_st.hwnd, IDC_EDIT_DEEPL_KEY, cfg->deepl_api_key);
     SetDlgItemTextW(g_st.hwnd, IDC_EDIT_MODEL,   cfg->model);
     SetDlgItemTextW(g_st.hwnd, IDC_EDIT_LANG,    cfg->target_language);
     SetDlgItemTextW(g_st.hwnd, IDC_EDIT_HOTKEY,  cfg->hotkey);
     SetDlgItemTextW(g_st.hwnd, IDC_EDIT_EXITKEY, cfg->exit_hotkey);
 
-    SendDlgItemMessageW(g_st.hwnd, IDC_SLD_MASK, TBM_SETPOS, TRUE,
-                        (LPARAM)(int)(cfg->mask_opacity * 100.0f + 0.5f));
-    SendDlgItemMessageW(g_st.hwnd, IDC_SLD_OVERLAY, TBM_SETPOS, TRUE,
-                        (LPARAM)(int)(cfg->overlay_opacity * 100.0f + 0.5f));
-    SendDlgItemMessageW(g_st.hwnd, IDC_SLD_FONT, TBM_SETPOS, TRUE,
-                        (LPARAM)cfg->font_size);
-
-    update_slider_values();
+    SendDlgItemMessageW(g_st.hwnd, IDC_COMBO_PROVIDER, CB_SETCURSEL, provider_combo_index(cfg->translation_provider), 0);
+    update_provider_label();
 }
 
 /* ---------- 窗口过程 ---------- */
@@ -1043,16 +1055,6 @@ static LRESULT CALLBACK settings_wnd_proc(HWND hwnd, UINT msg,
         return (LRESULT)g_st.bg_brush;
     }
 
-    case WM_HSCROLL: {
-        /* 滑块变化时刷新右侧数值 */
-        HWND slider = (HWND)lparam;
-        if (slider == GetDlgItem(hwnd, IDC_SLD_MASK) ||
-            slider == GetDlgItem(hwnd, IDC_SLD_OVERLAY) ||
-            slider == GetDlgItem(hwnd, IDC_SLD_FONT)) {
-            update_slider_values();
-        }
-        return 0;
-    }
 
     case WM_SETTINGS_NET_DONE:
         on_net_done((NetResult *)lparam);
@@ -1100,6 +1102,10 @@ static LRESULT CALLBACK settings_wnd_proc(HWND hwnd, UINT msg,
 
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
+        case IDC_COMBO_PROVIDER:
+            if (HIWORD(wparam) == CBN_SELCHANGE) update_provider_label();
+            return 0;
+
         case IDC_BTN_SAVE:
             if (validate_and_save()) {
                 LOG_INFO("settings", L"配置已保存");
@@ -1116,6 +1122,9 @@ static LRESULT CALLBACK settings_wnd_proc(HWND hwnd, UINT msg,
 
         case IDC_BTN_TEST:
             start_net_job(NET_TEST);
+            return 0;
+        case IDC_BTN_DEEPL_TEST:
+            start_net_job(NET_DEEPL);
             return 0;
 
         case IDC_BTN_MODELS:

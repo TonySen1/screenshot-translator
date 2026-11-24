@@ -136,7 +136,8 @@ void tray_show_menu(HWND hwnd)
     mi.dwStyle = MNS_NOCHECK;
     SetMenuInfo(menu, &mi);
 
-    AppendMenuW(menu, MF_STRING, IDM_CAPTURE,  L"截图翻译");
+    AppendMenuW(menu, MF_STRING, IDM_CAPTURE, L"截图翻译（本地识别）");
+    AppendMenuW(menu, MF_STRING, IDM_CAPTURE_VISION, L"看图翻译（上传截图）");
     AppendMenuW(menu, MF_STRING, IDM_SETTINGS, L"设置");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, IDM_EXIT,     L"退出");

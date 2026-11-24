@@ -1,4 +1,4 @@
-/* translator.h —— 调 OpenAI 兼容的多模态接口做 OCR + 翻译 */
+/* translator.h —— OpenAI 兼容的文本翻译与可选看图翻译 */
 #ifndef TRANSLATOR_H
 #define TRANSLATOR_H
 
@@ -6,14 +6,16 @@
 #include <stddef.h>
 #include "config.h"
 #include "image.h"
+#include "text_table.h"
 
 typedef struct TranslationResult {
     wchar_t *original;      /* 识别出的原文（可能为空串） */
     wchar_t *translated;    /* 译文（可能为空串） */
-    wchar_t *error;         /* 非 NULL 表示失败，此时上面两项为空串 */
+    wchar_t *error;         /* 非 NULL 表示失败 */
+    TextTable table;        /* 非空时以表格绘制；原文/译文用 TSV 复制 */
 } TranslationResult;
 
-/* 在主线程调用：把选区缩放到长边 <=1568，再编码成 JPEG q85。
+/* 把选区缩放到长边 <=1568，再编码成 JPEG q85。
    调用方用 heap_free 释放 *out_image。 */
 BOOL translator_prepare_image(const ImageBuffer *image,
                               void **out_image, size_t *out_size);
@@ -23,6 +25,10 @@ BOOL translator_prepare_image(const ImageBuffer *image,
    调用方负责 translation_result_free。 */
 void translator_run_image(const Config *cfg, const void *image, size_t image_size,
                           TranslationResult *result);
+
+/* 本地 OCR 文本；接管 source，借用可为空的 table_json。 */
+void translator_run_text(const Config *cfg, wchar_t *source, const struct cJSON *table_json,
+                         TranslationResult *result);
 
 void translation_result_free(TranslationResult *result);
 

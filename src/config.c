@@ -1,5 +1,6 @@
 /* config.c —— config.json 读写 */
 #include "config.h"
+#include "providers.h"
 #include "util.h"
 
 #include "cJSON.h"
@@ -25,6 +26,7 @@ void config_defaults(Config *cfg)
     wstr_copy(cfg->api_base_url, 512, DEFAULT_API_BASE);
     cfg->api_key[0] = 0;
     wstr_copy(cfg->model, 128, DEFAULT_MODEL);
+    wstr_copy(cfg->translation_provider, 32, TRANSLATION_PROVIDER_OPENAI);
     wstr_copy(cfg->hotkey, 64, DEFAULT_HOTKEY);
     wstr_copy(cfg->exit_hotkey, 64, DEFAULT_EXIT_KEY);
     wstr_copy(cfg->target_language, 64, DEFAULT_LANGUAGE);
@@ -181,13 +183,17 @@ ConfigLoadStatus config_load(Config *cfg, const wchar_t *path)
 
     get_string(root, "api_base_url", cfg->api_base_url, 512, DEFAULT_API_BASE);
     get_string(root, "api_key",      cfg->api_key,      512, L"");
+    get_string(root, "deepl_api_key", cfg->deepl_api_key, 512, L"");
     get_string(root, "model",        cfg->model,        128, DEFAULT_MODEL);
+    get_string(root, "translation_provider", cfg->translation_provider, 32, L"");
     get_string(root, "hotkey",       cfg->hotkey,        64, DEFAULT_HOTKEY);
     get_string(root, "exit_hotkey",  cfg->exit_hotkey,   64, DEFAULT_EXIT_KEY);
     get_string(root, "target_language", cfg->target_language, 64, DEFAULT_LANGUAGE);
     get_string(root, "overlay_bg",   cfg->overlay_bg,    16, DEFAULT_OVERLAY_BG);
     get_string(root, "overlay_fg",   cfg->overlay_fg,    16, DEFAULT_OVERLAY_FG);
-
+    if (cfg->translation_provider[0] == 0 || !provider_id_is_known(cfg->translation_provider)) {
+        wstr_copy(cfg->translation_provider, 32, provider_default_for(cfg));
+    }
     /* 字符串项兜底：空值退回默认（api_key 例外，允许为空） */
     if (cfg->api_base_url[0] == 0) wstr_copy(cfg->api_base_url, 512, DEFAULT_API_BASE);
     if (cfg->model[0] == 0)        wstr_copy(cfg->model, 128, DEFAULT_MODEL);
@@ -223,7 +229,9 @@ BOOL config_save(const Config *cfg, const wchar_t *path)
 
     u8 = u16_to_u8(cfg->api_base_url); cJSON_AddStringToObject(root, "api_base_url", u8 ? u8 : ""); heap_free(u8);
     u8 = u16_to_u8(cfg->api_key);      cJSON_AddStringToObject(root, "api_key",      u8 ? u8 : ""); heap_free(u8);
+    u8 = u16_to_u8(cfg->deepl_api_key); cJSON_AddStringToObject(root, "deepl_api_key", u8 ? u8 : ""); heap_free(u8);
     u8 = u16_to_u8(cfg->model);        cJSON_AddStringToObject(root, "model",        u8 ? u8 : ""); heap_free(u8);
+    u8 = u16_to_u8(cfg->translation_provider); cJSON_AddStringToObject(root, "translation_provider", u8 ? u8 : ""); heap_free(u8);
     u8 = u16_to_u8(cfg->hotkey);       cJSON_AddStringToObject(root, "hotkey",       u8 ? u8 : ""); heap_free(u8);
     u8 = u16_to_u8(cfg->exit_hotkey);  cJSON_AddStringToObject(root, "exit_hotkey",  u8 ? u8 : ""); heap_free(u8);
     u8 = u16_to_u8(cfg->target_language); cJSON_AddStringToObject(root, "target_language", u8 ? u8 : ""); heap_free(u8);

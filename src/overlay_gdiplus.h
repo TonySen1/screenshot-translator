@@ -8,6 +8,7 @@
 #define OVERLAY_GDIPLUS_H
 
 #include <windows.h>
+#include "text_table.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,7 +45,9 @@ typedef struct OverlayTheme {
     int button_size;               /* 单个按钮的点击区边长 */
     int button_radius;             /* 按钮悬停底色的圆角 */
     int icon_size;                 /* 图标视觉尺寸 */
+    RECT toolbar_rect;             /* 非空时显式定位工具栏（客户区物理像素） */
 } OverlayTheme;
+
 
 /* 进程内初始化一次 */
 BOOL overlay_gdiplus_startup(void);
@@ -54,6 +57,10 @@ void overlay_gdiplus_shutdown(void);
    文字区宽度不会超过 theme->max_text_width。 */
 BOOL overlay_measure(const wchar_t *text, const OverlayTheme *theme,
                      int *out_width, int *out_height);
+BOOL overlay_measure_positioned(const TextTable *table, const OverlayTheme *theme,
+                                int source_width, int source_height,
+                                int *out_width, int *out_height,
+                                RECT *out_toolbar);
 
 /* 把整个浮层画进一段预乘 alpha 的 ARGB 缓冲（BGRA 字节序）。
    hover_button / pressed_button 取值 OVERLAY_BTN_*。
@@ -61,6 +68,11 @@ BOOL overlay_measure(const wchar_t *text, const OverlayTheme *theme,
 BOOL overlay_render(const wchar_t *text, const OverlayTheme *theme,
                     int width, int height, void *bits, int stride,
                     int hover_button, int pressed_button, int doc_enabled);
+/* 绘制局部物理像素坐标的 OCR 区域；source_origin 是选区在画布中的位置。 */
+BOOL overlay_render_positioned(const TextTable *table, POINT source_origin,
+                               const OverlayTheme *theme, int width, int height,
+                               void *bits, int stride, int hover_button,
+                               int pressed_button, int doc_enabled);
 
 /* 算三个按钮在客户区里的矩形。overlay_measure 算出尺寸后调用。
    任一 out 参数可为 NULL。 */

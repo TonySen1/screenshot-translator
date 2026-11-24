@@ -41,10 +41,10 @@ static BOOL crack_url(const wchar_t *url, BOOL *secure,
     return TRUE;
 }
 
-BOOL http_request_json(const wchar_t *method, const wchar_t *url,
-                       const char *const *headers,
-                       const char *body, size_t body_size,
-                       int timeout_ms, HttpResponse *out)
+static BOOL request_json(const wchar_t *method, const wchar_t *url,
+                         const char *const *headers, const char *body,
+                         size_t body_size, int timeout_ms, BOOL allow_redirect,
+                         HttpResponse *out)
 {
     if (method == NULL) method = L"GET";
     if (url == NULL || out == NULL) return FALSE;
@@ -95,6 +95,14 @@ BOOL http_request_json(const wchar_t *method, const wchar_t *url,
     if (request == NULL) {
         set_error(out, L"创建请求失败（错误 %lu）", GetLastError());
         goto cleanup;
+    }
+    if (!allow_redirect) {
+        DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        if (!WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY,
+                              &policy, sizeof(policy))) {
+            set_error(out, L"无法禁用请求重定向（错误 %lu）", GetLastError());
+            goto cleanup;
+        }
     }
 
     for (int i = 0; headers != NULL && headers[i] != NULL; i++) {
@@ -185,6 +193,20 @@ cleanup:
     if (connect != NULL) WinHttpCloseHandle(connect);
     WinHttpCloseHandle(session);
     return ok;
+}
+
+BOOL http_request_json(const wchar_t *method, const wchar_t *url,
+                       const char *const *headers, const char *body,
+                       size_t body_size, int timeout_ms, HttpResponse *out)
+{
+    return request_json(method, url, headers, body, body_size, timeout_ms, TRUE, out);
+}
+
+BOOL http_request_json_no_redirect(const wchar_t *method, const wchar_t *url,
+                                   const char *const *headers, const char *body,
+                                   size_t body_size, int timeout_ms, HttpResponse *out)
+{
+    return request_json(method, url, headers, body, body_size, timeout_ms, FALSE, out);
 }
 
 BOOL http_post_json(const wchar_t *url, const char *const *headers,

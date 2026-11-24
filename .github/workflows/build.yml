@@ -76,14 +76,25 @@ jobs:
           Write-Output ("size = {0:N0} bytes ({1:N1} KB)" -f $f.Length, ($f.Length/1KB))
           "ARTIFACT_SIZE=$($f.Length)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: 准备发布用的文件名
+      - name: 准备并打包 PaddleOCR 运行时
         shell: pwsh
-        run: Copy-Item build\screenshot-translator.exe build\ScreenshotTranslator.exe
+        run: |
+          ./setup-ocr.ps1 -CacheDirectory (Join-Path $env:RUNNER_TEMP 'paddle-ocr-cache')
+          & .\build\ocr\python.exe -I -B -X utf8 .\tests\test_ocr_worker.py
+          if ($LASTEXITCODE -ne 0) { throw 'OCR worker tests failed' }
+          $env:OCR_TABLE_RUNTIME = (Resolve-Path .\build\ocr).Path
+          & .\build\ocr\python.exe -I -B -X utf8 .\tests\test_ocr_table.py
+          if ($LASTEXITCODE -ne 0) { throw 'OCR table tests failed' }
+          Copy-Item build\screenshot-translator.exe build\ScreenshotTranslator.exe
+          Copy-Item LICENSE build\LICENSE
+          tar.exe -a -cf build\ScreenshotTranslator-windows-x64.zip -C build ScreenshotTranslator.exe LICENSE ocr
+          if ($LASTEXITCODE -ne 0) { throw 'OCR package creation failed' }
 
       - uses: actions/upload-artifact@v4
         with:
           name: screenshot-translator-windows
-          path: build\ScreenshotTranslator.exe
+          path: build\ScreenshotTranslator-windows-x64.zip
+          compression-level: 0
           if-no-files-found: error
 
       # 抽不到对应版本就跳过，下面会退回 --generate-notes
@@ -109,11 +120,11 @@ jobs:
         run: |
           $tag = "${{ github.ref_name }}"
           if (Test-Path release-notes.md) {
-            gh release create $tag build\ScreenshotTranslator.exe --title $tag --notes-file release-notes.md
+            gh release create $tag build\ScreenshotTranslator-windows-x64.zip --title $tag --notes-file release-notes.md
           } else {
-            gh release create $tag build\ScreenshotTranslator.exe --title $tag --generate-notes
+            gh release create $tag build\ScreenshotTranslator-windows-x64.zip --title $tag --generate-notes
           }
           # 幂等：tag 重建过时 Release 已存在，改成覆盖附件
           if ($LASTEXITCODE -ne 0) {
-            gh release upload $tag build\ScreenshotTranslator.exe --clobber
+            gh release upload $tag build\ScreenshotTranslator-windows-x64.zip --clobber
           }

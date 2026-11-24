@@ -10,60 +10,25 @@
 
 ---
 
-## 2.0.0：用 C 重写的原生版本
+## 本地识别，框选直接翻译
 
-2.0.0 是一次彻底的重构。整体从 Python + Tkinter 改写为 **C11 + 纯 Win32 API**，只保留了 OpenAI 兼容接口这一项外部约定。
+- **原位覆盖译文**：表格和文字会直接覆盖原文位置，不再在旁边生成第二张表；原网格、列宽、行高保留，背景色取自原图对应区域。
+- **表格保留行列**：清晰、对齐的表格按单元格翻译和显示，空间足够时放在原图旁边。长译文在格内换行；复制后可按原行列粘贴到表格软件。
+- **不等模型启动再截图**：Win32 主程序启动后在后台预热模型。松手立即显示进度，识别和翻译都在后台执行。
+- **保留看图翻译**：如遇识别困难的排版，可从托盘主动选择「看图翻译（上传截图）」。默认模式不会自动上传截图。
 
-| | 1.x（Python） | 2.0.0（C） |
-|---|---|---|
-| 单文件体积 | 约 40 MB（PyInstaller 打包） | **390 KB** |
-| 依赖的运行时 | 随包携带 Python 解释器 | **无**，只用 Windows 自带 DLL |
-| 冷启动 | 需要解包、初始化解释器与 Tk | **约 30 ms** |
-| 常驻内存 | 数十 MB | **约 30 MB** |
-| 需要额外安装 | 无，但包体大 | **无**，双击即用 |
-
-### 体积更小
-
-整个程序只有一个 `screenshot-translator.exe`，**390 KB**。
-
-用 `dumpbin /dependents` 看，它只依赖系统自带的动态库：
-
-```
-USER32.dll     GDI32.dll    MSIMG32.dll   gdiplus.dll
-WINHTTP.dll    COMCTL32.dll SHELL32.dll  KERNEL32.dll
-```
-
-没有 `MSVCR*.dll`（C 运行时已静态链接），没有 Python 解释器，没有第三方库的 DLL。复制这一个文件到任何 Windows 10/11 上都能直接运行。
-
-### 响应更快
-
-- **启动**：静态链接 + 无解释器初始化，冷启动约 30 ms。
-- **截图**：`BitBlt` 直接抓进 32 位 DIB，选区压暗、恢复原亮度、画边框全部在内存 DC 里完成，最后一次性 `BitBlt` 上屏，拖动框选时没有闪烁。
-- **浮层渲染**：先把圆角背景、文字、工具栏全画进一张预乘 alpha 位图，再用 `UpdateLayeredWindow` 一次性提交。关掉窗口时不会看到逐帧绘制的过程。
-- **翻译请求**：WinHTTP 在后台线程发起，主线程继续响应鼠标，浮层立刻显示「正在识别并翻译…」，结果回来再替换文字。
-
-### 更稳定
-
-- **热键用 `RegisterHotKey`，不用低级键盘钩子**。不拦截、不改写任何按键，`Ctrl+Alt+D` 按下后仍会传给前台程序。
-- **截图有重入保护**。截图过程有自己的消息循环，重复触发会被直接忽略，不会叠出多层黑色遮罩。
-- **热键状态自洽**。设置窗口整个生命周期内暂停全局热键，关闭时按最新配置重新注册，改来改去不会让快捷键失效。
-- **配置文件损坏可恢复**。JSON 解析失败时自动备份为 `config.json.broken`，再写一份默认值并弹窗提示，程序照常启动。
-- **翻译线程受控退出**。退出时等待后台线程收尾，不会留下悬空的消息投递。
-- **便携**。配置和日志都写在 exe 同目录，不碰注册表、不碰 AppData。
+界面、截图和全局热键仍用 C11 / Win32 实现。发布包自带 OCR 运行时，不需要安装 Python 或 Windows OCR 语言包。
 
 ---
 
 ## 一、最快上手
 
-1. 从 [Releases](../../releases) 页面下载 `screenshot-translator.exe`，把它复制到一个**你自己新建的文件夹**里，比如 `D:\截图翻译\`。
-   下载后可以自己改名成 `截图翻译.exe`，不影响运行。
-   不要放在桌面或 C 盘的程序目录里，否则 Windows 可能不让它写配置文件。
+1. 从 [Releases](../../releases) 下载 `ScreenshotTranslator-windows-x64.zip`，完整解压到可写目录。保持 `ScreenshotTranslator.exe` 和 `ocr` 文件夹在同一目录。
 2. **双击运行**。桌面上不会出现窗口，只在任务栏右下角的通知区域多一个小图标 —— 这是**正常的**。
-3. **右键那个小图标 → 设置**，填好这几项，然后点「保存」：
-   - **接口地址**：填服务商的 OpenAI 兼容地址，形如 `https://xxx/v1`
-   - **API Key**：填你自己的 Key
-   - **模型**：点「拉取列表」从接口拉下来选一个
-   - 不确定能不能用就点「**测试服务**」—— 它会真发一个请求过去试
+3. **右键那个小图标 → 设置**，选择下面一种文本翻译方式，测试通过后点「保存」：
+   - **DeepL**：只填「DeepL 密钥」，点「测试 DeepL」即可，不用填接口地址或选模型。程序自动使用 API Free 或 Pro 端点。
+   - **OpenAI 兼容**：留空「DeepL 密钥」，填写 OpenAI 地址（如 `https://xxx/v1`）、密钥和模型，再点「测试 OpenAI」。
+   - 同时配置时，默认截图文字用 DeepL；托盘「看图翻译」仍使用 OpenAI 兼容配置，模型必须支持图片。
 4. 关掉设置窗口。现在它就安静地在后台待命了。
 5. 按下 **Ctrl + Alt + D**，屏幕变暗，拖鼠标框住要翻译的内容，松手。
 6. 译文浮层出现在**鼠标按下的位置**附近。看完按 **Esc**、点右上角的 ✕，或点浮层外面的任何地方，它就消失了。
@@ -102,6 +67,7 @@ WINHTTP.dll    COMCTL32.dll SHELL32.dll  KERNEL32.dll
 {
     "api_base_url": "https://api.openai.com/v1",
     "api_key": "",
+    "deepl_api_key": "",
     "model": "gpt-4o-mini",
     "hotkey": "ctrl+alt+d",
     "exit_hotkey": "ctrl+alt+shift+q",
@@ -118,10 +84,11 @@ WINHTTP.dll    COMCTL32.dll SHELL32.dll  KERNEL32.dll
 | 字段 | 说明 |
 |---|---|
 | `api_base_url` | OpenAI 兼容接口地址，末尾通常带 `/v1` |
-| `api_key` | 你的 API Key |
-| `model` | 多模态模型名（要能看图） |
+| `api_key` | OpenAI 兼容接口密钥 |
+| `deepl_api_key` | DeepL 密钥；非空时用于 OCR 文本翻译，留空用 OpenAI 兼容接口 |
+| `model` | OpenAI 兼容的模型名；看图翻译需要支持图片 |
 | `hotkey` / `exit_hotkey` | 全局快捷键，格式如 `ctrl+alt+d` |
-| `target_language` | 翻译成什么语言 |
+| `target_language` | 译文语言；DeepL 下「中文」等同 `ZH-HANS`，也可填 `ZH-HANT`、`EN-US` 等语言代码 |
 | `mask_opacity` | 截图遮罩的不透明度，0.05 ~ 1.0，越小越暗 |
 | `overlay_opacity` | 译文浮层的不透明度，0.30 ~ 1.0 |
 | `overlay_bg` / `overlay_fg` | 浮层的背景色 / 文字色 |
@@ -134,13 +101,20 @@ WINHTTP.dll    COMCTL32.dll SHELL32.dll  KERNEL32.dll
 
 ## 五、从源码构建
 
-需要 Visual Studio 2022 Build Tools（MSVC 14.4x）和 Windows SDK 10。
+需要 Visual Studio 2022 Build Tools（MSVC 14.4x）、Windows SDK 10，以及首次准备 OCR 运行时的网络连接。
 
-```bat
-build.bat
+```powershell
+.\build.bat
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup-ocr.ps1
 ```
 
-产物在 `build\screenshot-translator.exe`。
+运行 `build\screenshot-translator.exe`，不要移走同级 `build\ocr`。只有准备运行时时才下载 OCR 依赖；运行时不会联网下载模型。
+
+本地运行 OCR 冒烟测试（需要 Windows 已安装英日韩字体，用于渲染测试图，与 OCR 语言包无关）：
+
+```powershell
+.\build\ocr\python.exe -I -B -X utf8 .\tests\smoke_ocr.py --artifacts .\build\ocr-smoke
+```
 
 ### 代码结构
 
@@ -152,6 +126,8 @@ build.bat
 | `src/overlay_gdiplus.cpp` | 唯一的 C++ 单元：GDI+ 文字排版与绘制 |
 | `src/settings.c` | 设置窗口（原生控件 + 深色主题） |
 | `src/translator.c` | 请求构造、响应解析 |
+| `src/ocr_process.c` | 管理常驻 OCR 子进程、限时管道通信 |
+| `ocr/worker.py` | 本地 PaddleOCR 推理与英日韩识别分流 |
 | `src/http.c` | WinHTTP 封装 |
 | `src/hotkey.c` | 全局热键解析与注册 |
 | `src/config.c` | config.json 读写 |
@@ -159,7 +135,7 @@ build.bat
 | `src/tray.c` | 托盘图标与菜单 |
 | `src/base64.c` | Base64 编码 |
 
-第三方只有两个单文件库：`third_party/cJSON.c`、`third_party/stb_image_write.h`。
+OCR 采用 PaddleOCR 模型，经 RapidOCR 和 ONNX Runtime 在 CPU 上运行。主程序内嵌 cJSON 与 stb_image_write。
 
 ---
 
@@ -175,7 +151,10 @@ build.bat
 检查 Key 有没有多余的空格，以及接口地址是否和 Key 所属的服务商一致。
 
 **图片里的文字没识别出来？**
-模型对图片的分辨率有要求。程序会先把选区缩放到长边 1568 再发出去；如果原文本身太小（比如整屏截图里的一个小角落），识别率会下降。
+尽量只框住文字，避免大面积背景；很小的字可以先在原窗口放大。对复杂排版可以从托盘选择「看图翻译（上传截图）」。
+
+**提示未找到 PaddleOCR？**
+从 ZIP 完整解压并保留 `ocr` 目录。若从源码构建，运行 `setup-ocr.ps1` 后重试。
 
 **配置文件不见了？**
 程序会把配置写在 exe 同目录。如果 exe 放在 Program Files 这类只读目录，会退到 `%LOCALAPPDATA%\ScreenshotTranslatorC`。

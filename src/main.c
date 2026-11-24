@@ -4,6 +4,7 @@
 #include "config.h"
 #include "image.h"
 #include "hotkey.h"
+#include "ocr_process.h"
 #include "overlay.h"
 #include "overlay_gdiplus.h"
 #include "resource.h"
@@ -36,8 +37,9 @@ static const wchar_t *OVERLAY_BUSY_TEXT = L"正在识别并翻译…";
 typedef struct TranslateJob {
     HWND        notify;
     Config      cfg;          /* 复制一份，避免和主线程共享 */
-    void       *png;
-    size_t      png_size;
+    ImageBuffer image;        /* 仅拥有 BGRA 像素，不跨线程传 GDI 句柄 */
+    BOOL        vision;
+    ULONGLONG   started;
 } TranslateJob;
 
 static DWORD WINAPI translate_thread(LPVOID param)
@@ -46,56 +48,80 @@ static DWORD WINAPI translate_thread(LPVOID param)
 
     TranslationResult *result = (TranslationResult *)heap_alloc(sizeof(*result));
     if (result != NULL) {
-        memset(result, 0, sizeof(*result));
-        translator_run_image(&job->cfg, job->png, job->png_size, result);
+        *result = (TranslationResult){0};
+        if (job->vision) {
+            void *jpeg = NULL;
+            size_t jpeg_size = 0;
+            /* 失败时返回空图，由翻译路径统一报告图片处理失败。 */
+            translator_prepare_image(&job->image, &jpeg, &jpeg_size);
+            translator_run_image(&job->cfg, jpeg, jpeg_size, result);
+            heap_free(jpeg);
+        } else {
+            OcrResult ocr;
+            if (ocr_recognize(&job->image, &ocr)) {
+                translator_run_text(&job->cfg, ocr.text, ocr.table, result);
+                ocr.text = NULL;
+            } else {
+                result->error = ocr.error ? ocr.error : u8_to_u16("本地识别失败，请重试。");
+                ocr.error = NULL;
+            }
+            ocr_result_free(&ocr);
+        }
     }
 
     HWND notify = job->notify;
-    heap_free(job->png);
+    ULONGLONG started = job->started;
+    heap_free(job->image.bits);
     heap_free(job);
 
-    PostMessageW(notify, WM_APP_TRANSLATED, 0, (LPARAM)result);
+    if (!PostMessageW(notify, WM_APP_TRANSLATED, (WPARAM)started, (LPARAM)result)) {
+        translation_result_free(result);
+        heap_free(result);
+    }
     return 0;
 }
 
-static void start_translation(HWND hwnd, const ImageBuffer *image)
+static void start_translation(HWND hwnd, const ImageBuffer *image, BOOL vision,
+                              ULONGLONG started)
 {
-    if (g_app.translating) {
-        LOG_INFO("main", L"上一次翻译还没结束，忽略本次请求");
-        return;
-    }
-
-    void *data = NULL;
-    size_t data_size = 0;
-    if (!translator_prepare_image(image, &data, &data_size)) {
-        overlay_show(hwnd, L"图片处理失败", &g_app.cfg);
-        return;
-    }
-
     TranslateJob *job = (TranslateJob *)heap_alloc(sizeof(*job));
     if (job == NULL) {
-        heap_free(data);
         overlay_show(hwnd, L"内存不足，无法翻译", &g_app.cfg);
         return;
     }
 
+    size_t bytes = (size_t)image->stride * (size_t)image->height;
+    void *pixels = heap_alloc(bytes);
+    if (!pixels) {
+        heap_free(job);
+        overlay_show(hwnd, L"内存不足，无法翻译", &g_app.cfg);
+        return;
+    }
+    GdiFlush();
+    memcpy(pixels, image->bits, bytes);
     job->notify = hwnd;
     job->cfg = g_app.cfg;
-    job->png = data;
-    job->png_size = data_size;
+    job->image = (ImageBuffer){0};
+    job->image.width = image->width;
+    job->image.height = image->height;
+    job->image.stride = image->stride;
+    job->image.bits = pixels;
+    job->vision = vision;
+    job->started = started;
 
     g_app.translating = TRUE;
     g_app.worker = CreateThread(NULL, 0, translate_thread, job, 0, NULL);
     if (g_app.worker == NULL) {
         LOG_ERR("main", L"创建翻译线程失败（错误 %lu）", GetLastError());
         g_app.translating = FALSE;
-        heap_free(job->png);
+        heap_free(job->image.bits);
         heap_free(job);
         overlay_show(hwnd, L"无法启动翻译线程", &g_app.cfg);
         return;
     }
 
-    LOG_INFO("main", L"翻译线程已启动（图片 %zu 字节）", data_size);
+    LOG_INFO("main", L"已启动%ls（%dx%d）", vision ? L"看图翻译" : L"本地识别翻译",
+             image->width, image->height);
 }
 
 static LRESULT CALLBACK msg_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -113,16 +139,26 @@ static void shutdown_app(HWND hwnd)
     hotkey_unregister_all(hwnd);
     tray_remove();
 
-    /* 翻译线程还在跑就先等它结束。窗口此时还没销毁，它 Post 的
-       WM_APP_TRANSLATED 会被丢弃（消息循环已经退出），但那不影响退出。
-       等不到也不能无限挂着，5 秒后强退。 */
+    /* 工作线程仍使用管道时不关闭其句柄。若 5 秒内未完成，
+       进程退出会自动关闭 Job 并回收 OCR 子进程。 */
+    BOOL worker_finished = TRUE;
     if (g_app.worker != NULL) {
         DWORD wait = WaitForSingleObject(g_app.worker, 5000);
         if (wait != WAIT_OBJECT_0) {
+            worker_finished = FALSE;
             LOG_WARN("main", L"翻译线程未在 5 秒内结束，强制退出");
         }
         CloseHandle(g_app.worker);
         g_app.worker = NULL;
+    }
+    if (worker_finished) {
+        ocr_stop();
+        MSG completed;
+        if (PeekMessageW(&completed, hwnd, WM_APP_TRANSLATED, WM_APP_TRANSLATED, PM_REMOVE)) {
+            TranslationResult *result = (TranslationResult *)completed.lParam;
+            translation_result_free(result);
+            heap_free(result);
+        }
     }
 
     if (g_app.mutex) {
@@ -189,6 +225,9 @@ static LRESULT CALLBACK msg_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
         case IDM_CAPTURE:
             PostMessageW(hwnd, WM_APP_CAPTURE, 0, 0);
             break;
+        case IDM_CAPTURE_VISION:
+            PostMessageW(hwnd, WM_APP_CAPTURE, TRUE, 0);
+            break;
         case IDM_EXIT:
             PostMessageW(hwnd, WM_APP_QUIT, 0, 0);
             break;
@@ -198,9 +237,15 @@ static LRESULT CALLBACK msg_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
         return 0;
 
     case WM_APP_CAPTURE: {
+        if (g_app.translating) {
+            LOG_INFO("main", L"上一次翻译还没结束，忽略本次请求");
+            return 0;
+        }
+        BOOL vision = wparam != 0;
         Selection sel;
         ImageBuffer shot;
         if (capture_select(hwnd, &g_app.cfg, &sel, &shot)) {
+            ULONGLONG started = GetTickCount64();
             LOG_INFO("main", L"选区（虚拟屏坐标）：left=%d top=%d w=%d h=%d",
                      sel.left, sel.top, sel.width, sel.height);
 
@@ -216,12 +261,14 @@ static LRESULT CALLBACK msg_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
                 anchor.right  = pt.x;
                 anchor.bottom = pt.y;
                 overlay_set_anchor(&anchor);
+                RECT selection = {sel.left, sel.top, sel.left + sel.width, sel.top + sel.height};
+                overlay_set_selection(&selection);
             }
 
             /* 先把浮层立起来当"正在翻译"提示，结果回来再换文字。
                先显示再发请求，用户能立刻看到反馈。 */
-            overlay_show(hwnd, OVERLAY_BUSY_TEXT, &g_app.cfg);
-            start_translation(hwnd, &shot);
+            overlay_show(hwnd, vision ? L"正在看图翻译…" : OVERLAY_BUSY_TEXT, &g_app.cfg);
+            start_translation(hwnd, &shot, vision, started);
             image_free(&shot);
         } else {
             LOG_INFO("main", L"截图被取消");
@@ -249,7 +296,9 @@ static LRESULT CALLBACK msg_wnd_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
         } else if (result->translated != NULL && result->translated[0] != 0) {
             /* 同时带上原文，文档按钮可以在两者之间切换 */
             overlay_show_pair(hwnd, result->original, result->translated,
-                              &g_app.cfg);
+                              &result->table, &g_app.cfg);
+            LOG_INFO("main", L"从选区完成到显示译文：%llu ms",
+                     GetTickCount64() - (ULONGLONG)wparam);
         } else {
             overlay_show(hwnd, L"图片里没有识别到文字", &g_app.cfg);
         }
@@ -412,6 +461,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance,
 
     hotkey_register_all(g_app.hwnd, &g_app.cfg);
     tray_init(g_app.hwnd, &g_app.cfg);
+    if (!g_overlay_test && !auto_cancel) {
+        wchar_t exe_dir[MAX_PATH];
+        if (get_exe_dir(exe_dir, MAX_PATH)) ocr_preload(exe_dir);
+    }
 
     /* 配置损坏时提示用户，而不是静默用默认值 —— 否则用户会以为设置丢了 */
     if (load_status == CONFIG_LOAD_CORRUPTED ||
@@ -466,6 +519,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE prev_instance,
 
     /* 正常走 WM_CLOSE 时已经清理过，这里兜底 */
     if (!g_app.quitting) {
+        if (!g_app.worker) ocr_stop();
         hotkey_unregister_all(g_app.hwnd);
         tray_remove();
         if (g_app.mutex) { CloseHandle(g_app.mutex); g_app.mutex = NULL; }

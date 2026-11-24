@@ -24,6 +24,11 @@ BOOL http_request_json(const wchar_t *method, const wchar_t *url,
                        const char *body, size_t body_size,
                        int timeout_ms, HttpResponse *out);
 
+/* 不跟随 3xx，适用于只允许向固定服务发送凭据的请求。 */
+BOOL http_request_json_no_redirect(const wchar_t *method, const wchar_t *url,
+                                   const char *const *headers, const char *body,
+                                   size_t body_size, int timeout_ms, HttpResponse *out);
+
 /* POST JSON 的简写 */
 BOOL http_post_json(const wchar_t *url, const char *const *headers,
                     const char *body, size_t body_size,

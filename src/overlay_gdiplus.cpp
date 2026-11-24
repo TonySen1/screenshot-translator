@@ -426,6 +426,11 @@ static void compute_layout(const OverlayTheme *theme, float width, float height,
                      + (float)theme->gap;
 
     if (out->toolbar.X < out->text_box.X) out->toolbar.X = out->text_box.X;
+    if (!IsRectEmpty(&theme->toolbar_rect)) {
+        const RECT *r = &theme->toolbar_rect;
+        out->toolbar = RectF((REAL)r->left, (REAL)r->top,
+                             (REAL)(r->right - r->left), (REAL)(r->bottom - r->top));
+    }
 
     for (int i = 0; i < 4; i++) {
         out->buttons[i].Width = btn;
@@ -517,7 +522,7 @@ static void draw_toolbar(Graphics *g, const OverlayTheme *theme,
     add_round_rect(&pill, lay->toolbar, pill_radius);
     /* 工具栏底色跟着文字框走，两者用同一个半透明色：
        分成两个色阶时，在半透明背景下会看出明显色差。 */
-    SolidBrush pill_bg(argb_to_color(theme->bg_argb));
+    SolidBrush pill_bg(argb_to_color(theme->toolbar_bg_argb));
     g->FillPath(&pill_bg, &pill);
 
     /* 和译文框一样描一条 1px 边，两块区域的质感才统一 */
@@ -679,11 +684,12 @@ BOOL overlay_measure(const wchar_t *text, const OverlayTheme *theme,
     return ok;
 }
 
+
 BOOL overlay_render(const wchar_t *text, const OverlayTheme *theme,
                     int width, int height, void *bits, int stride,
                     int hover_button, int pressed_button, int doc_enabled)
 {
-    if (!g_gdiplus_ready || text == NULL || theme == NULL ||
+    if (!g_gdiplus_ready || !text || theme == NULL ||
         bits == NULL || width <= 0 || height <= 0) {
         return FALSE;
     }
@@ -748,38 +754,197 @@ BOOL overlay_render(const wchar_t *text, const OverlayTheme *theme,
         g.DrawPath(&border, &text_path);
     }
 
-    Font *body = create_body_font(theme->font_px);
-    Font *emoji = create_emoji_font(theme->font_px);
-
-    if (body != NULL && body->GetLastStatus() == Ok) {
-        StringFormat fmt;
-        setup_unit_format(&fmt);
-
-        SolidBrush fg_brush(argb_to_color(theme->fg_argb));
-
-        float text_x = lay.text_box.X + (float)theme->text_pad;
-        float text_y = lay.text_box.Y + (float)theme->text_pad_y;
-        float text_limit = lay.text_box.Width - (float)theme->text_pad * 2.0f;
-
-        TextLayout text_lay;
-        layout_init(&text_lay);
-        if (layout_text(&g, text, body, emoji, &fmt, text_limit, &text_lay)) {
-            for (int i = 0; i < text_lay.run_count; i++) {
-                const TextRun *run = &text_lay.runs[i];
-                Font *font = (run->font == FONT_EMOJI && emoji != NULL) ? emoji : body;
-                g.DrawString(text + run->start, run->len, font,
-                             PointF(text_x + run->x, text_y + run->y),
-                             &fmt, &fg_brush);
+        Font *body = create_body_font(theme->font_px);
+        Font *emoji = create_emoji_font(theme->font_px);
+        if (body != NULL && body->GetLastStatus() == Ok) {
+            StringFormat fmt;
+            setup_unit_format(&fmt);
+            SolidBrush fg_brush(argb_to_color(theme->fg_argb));
+            float text_x = lay.text_box.X + (float)theme->text_pad;
+            float text_y = lay.text_box.Y + (float)theme->text_pad_y;
+            float text_limit = lay.text_box.Width - (float)theme->text_pad * 2.0f;
+            TextLayout text_lay;
+            layout_init(&text_lay);
+            if (layout_text(&g, text, body, emoji, &fmt, text_limit, &text_lay)) {
+                for (int i = 0; i < text_lay.run_count; i++) {
+                    const TextRun *run = &text_lay.runs[i];
+                    Font *font = (run->font == FONT_EMOJI && emoji != NULL) ? emoji : body;
+                    g.DrawString(text + run->start, run->len, font,
+                                 PointF(text_x + run->x, text_y + run->y),
+                                 &fmt, &fg_brush);
+                }
             }
+            layout_free(&text_lay);
         }
-        layout_free(&text_lay);
-    }
-    delete body;
-    delete emoji;
+        delete body;
+        delete emoji;
 
     /* 3. 胶囊工具栏 */
     draw_toolbar(&g, theme, &lay, hover_button, pressed_button, doc_enabled);
 
+    return TRUE;
+}
+
+
+/* ---------- 原位 OCR 文字 ---------- */
+static unsigned int region_ink(COLORREF fg)
+{
+    return 0xFF000000u | ((unsigned int)GetRValue(fg) << 16) |
+           ((unsigned int)GetGValue(fg) << 8) | (unsigned int)GetBValue(fg);
+}
+
+static BOOL region_layout(Graphics *g, const wchar_t *text, Font *body,
+                          Font *emoji, float max_w, float max_h, TextLayout *out)
+{
+    if (!text || !*text || !body || !out) return FALSE;
+    layout_init(out);
+    StringFormat fmt;
+    setup_unit_format(&fmt);
+    if (!layout_text(g, text, body, emoji, &fmt, max_w, out)) return FALSE;
+    return out->width <= max_w + 1.0f && out->height <= max_h + 1.0f;
+}
+
+static void draw_positioned_region(Graphics *g, const TextTable *table,
+                                   int index, POINT origin,
+                                   const OverlayTheme *theme, Font *body, Font *emoji)
+{
+    const TextRegion *r = &table->regions[index];
+    RECT b = r->bounds;
+    RECT lim = r->limit;
+    if (lim.right <= lim.left || lim.bottom <= lim.top) return;
+    if (b.left < lim.left) b.left = lim.left;
+    if (b.top < lim.top) b.top = lim.top;
+    if (b.right > lim.right) b.right = lim.right;
+    if (b.bottom > lim.bottom) b.bottom = lim.bottom;
+
+    SolidBrush bg(Color(255, GetRValue(r->background), GetGValue(r->background),
+                        GetBValue(r->background)));
+    if (b.right > b.left && b.bottom > b.top) {
+        g->FillRectangle(&bg, (REAL)(origin.x + b.left), (REAL)(origin.y + b.top),
+                         (REAL)(b.right - b.left), (REAL)(b.bottom - b.top));
+    }
+
+    const wchar_t *src = table->cells ? table->cells[index] : NULL;
+    if (!src || !*src || !body) return;
+    float max_w = (float)(lim.right - lim.left);
+    float max_h = (float)(lim.bottom - lim.top);
+    TextLayout chosen;
+    memset(&chosen, 0, sizeof(chosen));
+    Font *chosen_body = body;
+    Font *chosen_emoji = emoji;
+    wchar_t *ellipsis = NULL;
+
+    int base = theme->font_px;
+    if (base < 8) base = 8;
+    for (int px = base; px >= 8 && chosen.run_count == 0; px--) {
+        Font *f = create_body_font(px);
+        Font *e = create_emoji_font(px);
+        TextLayout candidate;
+        memset(&candidate, 0, sizeof(candidate));
+        if (region_layout(g, src, f, e, max_w, max_h, &candidate)) {
+            chosen = candidate; chosen_body = f; chosen_emoji = e; break;
+        }
+        layout_free(&candidate); delete f; delete e;
+    }
+    if (chosen.run_count == 0) {
+        size_t n = wcslen(src);
+        while (n > 0 && chosen.run_count == 0) {
+            size_t cut = n > 1 ? n - 1 : 1;
+            ellipsis = (wchar_t *)malloc((cut + 2) * sizeof(wchar_t));
+            if (!ellipsis) break;
+            memcpy(ellipsis, src, cut * sizeof(wchar_t));
+            ellipsis[cut] = 0x2026; ellipsis[cut + 1] = 0;
+            Font *f = create_body_font(8); Font *e = create_emoji_font(8);
+            TextLayout candidate; memset(&candidate, 0, sizeof(candidate));
+            if (region_layout(g, ellipsis, f, e, max_w, max_h, &candidate)) {
+                chosen = candidate; chosen_body = f; chosen_emoji = e; break;
+            }
+            layout_free(&candidate); delete f; delete e; free(ellipsis); ellipsis = NULL;
+            n = cut;
+        }
+    }
+    if (chosen.run_count == 0) { free(ellipsis); return; }
+
+    int chosen_width = (int)ceilf(chosen.width);
+    int chosen_height = (int)ceilf(chosen.height);
+    int source_lines = 1;
+    for (const wchar_t *p = src; *p; p++) if (*p == L'\n') source_lines++;
+    int x = r->centered ? b.left + ((b.right - b.left) - chosen_width) / 2 : b.left;
+    int y = source_lines > 1 ? b.top : b.top + ((b.bottom - b.top) - chosen_height) / 2;
+    if (x < lim.left) x = lim.left;
+    if (y < lim.top) y = lim.top;
+    if (x + (int)ceilf(chosen.width) > lim.right) x = lim.right - (int)ceilf(chosen.width);
+    if (y + (int)ceilf(chosen.height) > lim.bottom) y = lim.bottom - (int)ceilf(chosen.height);
+    if (x < lim.left) x = lim.left;
+    if (y < lim.top) y = lim.top;
+
+    /* 只扩展原 glyph mask 到实际译文包围盒，绝不填充整个单元格。 */
+    g->FillRectangle(&bg, (REAL)(origin.x + x), (REAL)(origin.y + y),
+                     chosen.width, chosen.height);
+    SolidBrush ink(argb_to_color(region_ink(r->foreground)));
+    StringFormat fmt; setup_unit_format(&fmt);
+    const wchar_t *draw_text = ellipsis ? ellipsis : src;
+    for (int i = 0; i < chosen.run_count; i++) {
+        const TextRun *run = &chosen.runs[i];
+        Font *font = (run->font == FONT_EMOJI && chosen_emoji) ? chosen_emoji : chosen_body;
+        g->DrawString(draw_text + run->start, run->len, font,
+                      PointF((REAL)(origin.x + x) + run->x,
+                             (REAL)(origin.y + y) + run->y), &fmt, &ink);
+    }
+    layout_free(&chosen);
+    if (chosen_body != body) delete chosen_body;
+    if (chosen_emoji != emoji) delete chosen_emoji;
+    free(ellipsis);
+}
+
+BOOL overlay_measure_positioned(const TextTable *table, const OverlayTheme *theme,
+                                int source_width, int source_height,
+                                int *out_width, int *out_height, RECT *out_toolbar)
+{
+    if (!table || !table->regions || !theme || !out_width || !out_height ||
+        source_width <= 0 || source_height <= 0) return FALSE;
+    int toolbar_w = theme->button_size * 3 + (theme->toolbar_h - theme->button_size) + 2;
+    int content_width = source_width > toolbar_w ? source_width : toolbar_w;
+    /* 原位模式的文字从 (0, 0) 开始，胶囊原先紧贴位图右下边界，
+       GDI+ 的 1px 边框会被 UpdateLayeredWindow 裁掉。保留一块透明边距，
+       不改变文字和胶囊在屏幕上的实际位置。 */
+    int edge_pad = theme->padding > 0 ? theme->padding : 1;
+    *out_width = content_width + edge_pad;
+    *out_height = source_height + theme->gap + theme->toolbar_h + edge_pad;
+    if (out_toolbar) SetRect(out_toolbar, content_width - toolbar_w,
+                             source_height + theme->gap,
+                             content_width,
+                             source_height + theme->gap + theme->toolbar_h);
+    return TRUE;
+}
+
+BOOL overlay_render_positioned(const TextTable *table, POINT origin,
+                               const OverlayTheme *theme, int width, int height,
+                               void *bits, int stride, int hover_button,
+                               int pressed_button, int doc_enabled)
+{
+    if (!g_gdiplus_ready || !table || !table->regions || !theme || !bits ||
+        width <= 0 || height <= 0) return FALSE;
+    Bitmap bmp(width, height, stride, PixelFormat32bppPARGB, (BYTE *)bits);
+    if (bmp.GetLastStatus() != Ok) return FALSE;
+    Graphics g(&bmp);
+    g.SetSmoothingMode(SmoothingModeAntiAlias); g.SetTextRenderingHint(TextRenderingHintAntiAliasGridFit);
+    g.SetCompositingMode(CompositingModeSourceOver); g.Clear(Color(0, 0, 0, 0));
+    Font *body = create_body_font(theme->font_px);
+    Font *emoji = create_emoji_font(theme->font_px);
+    int count = table->rows * table->cols;
+    if (count > TEXT_TABLE_MAX_CELLS) count = TEXT_TABLE_MAX_CELLS;
+    for (int i = 0; i < count; i++) draw_positioned_region(&g, table, i, origin, theme, body, emoji);
+    delete body; delete emoji;
+
+    ToolbarLayout lay; memset(&lay, 0, sizeof(lay)); lay.toolbar = RectF((REAL)theme->toolbar_rect.left,
+        (REAL)theme->toolbar_rect.top, (REAL)(theme->toolbar_rect.right - theme->toolbar_rect.left),
+        (REAL)(theme->toolbar_rect.bottom - theme->toolbar_rect.top));
+    REAL btn = (REAL)theme->button_size;
+    REAL inner = ((REAL)theme->toolbar_h - btn) * 0.5f;
+    for (int i = 1; i <= 3; i++) { lay.buttons[i] = RectF(lay.toolbar.X + inner + btn * (REAL)(i - 1),
+        lay.toolbar.Y + inner, btn, btn); }
+    draw_toolbar(&g, theme, &lay, hover_button, pressed_button, doc_enabled);
     return TRUE;
 }
 

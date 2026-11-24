@@ -7,7 +7,7 @@
 
 /* 自定义消息：一律用 PostMessage 投递到隐藏的消息窗口，由主线程处理 */
 #define WM_APP_TRAY            (WM_APP + 1)   /* 托盘图标回调 */
-#define WM_APP_CAPTURE         (WM_APP + 2)   /* 请求截图（热键/菜单） */
+#define WM_APP_CAPTURE         (WM_APP + 2)   /* 截图；wParam 为 TRUE 时显式使用看图模式 */
 #define WM_APP_QUIT            (WM_APP + 3)   /* 请求退出 */
 #define WM_APP_TRANSLATED      (WM_APP + 4)   /* 工作线程翻译完成，lParam = TranslationResult* */
 #define WM_APP_OVERLAY_CLOSED  (WM_APP + 5)   /* 译文浮层已关闭 */
@@ -16,12 +16,13 @@
 #define IDM_SETTINGS           1001
 #define IDM_CAPTURE            1002
 #define IDM_EXIT               1003
+#define IDM_CAPTURE_VISION     1004
 
 /* 托盘图标 ID */
 #define TRAY_ICON_ID           1
 
 #define APP_NAME               L"截图翻译"
-#define APP_VERSION            L"2.0.1"
+#define APP_VERSION            L"2.1.0"
 #define APP_CLASS              L"ScreenshotTranslatorMsgWnd"
 #define APP_MUTEX              L"Local\\ScreenshotTranslatorC_SingleInstance"
 

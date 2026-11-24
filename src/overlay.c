@@ -32,6 +32,9 @@ typedef struct OverlayState {
     wchar_t    *text;              /* 当前显示的文字（指向下面两个之一） */
     wchar_t    *translated_copy;   /* 译文 */
     wchar_t    *original;          /* 原文，可为 NULL */
+    TextTable   table;
+    BOOL        positioned;
+    POINT       source_origin;
 
     int         x, y;              /* 屏幕坐标（虚拟屏） */
     int         width, height;
@@ -68,6 +71,7 @@ static BOOL         g_class_ready = FALSE;
 /* 框选区域（虚拟屏幕坐标）。有值时浮层贴着它摆，不再跟随鼠标。 */
 static BOOL         g_has_anchor = FALSE;
 static RECT         g_anchor;
+static RECT         g_selection;
 static DWORD        g_auto_close_ms = 0;
 static int          g_max_text_width = 600;
 
@@ -185,11 +189,11 @@ static void build_theme(const Config *cfg)
     g_ov.theme.text_pad_y      = scale_px(5);
     g_ov.theme.max_text_width  = scale_px(g_max_text_width);
     g_ov.theme.gap             = scale_px(6);
-    g_ov.theme.toolbar_h       = scale_px(28);
+    g_ov.theme.toolbar_h       = scale_px(26);
     g_ov.theme.toolbar_radius  = scale_px(7);
-    g_ov.theme.button_size     = scale_px(24);
+    g_ov.theme.button_size     = scale_px(22);
     g_ov.theme.button_radius   = scale_px(5);
-    g_ov.theme.icon_size       = scale_px(14);
+    g_ov.theme.icon_size       = scale_px(12);
 }
 
 /* ================= 位图与呈现 ================= */
@@ -260,10 +264,19 @@ static BOOL render_now(void)
 {
     if (g_ov.hwnd == NULL || g_ov.bits == NULL) return FALSE;
 
-    if (!overlay_render(g_ov.text, &g_ov.theme, g_ov.width, g_ov.height,
-                        g_ov.bits, g_ov.width * 4,
-                        g_ov.hover_button, g_ov.pressed_button,
-                        has_original())) {
+    BOOL drawn;
+    if (g_ov.positioned) {
+        drawn = overlay_render_positioned(&g_ov.table, g_ov.source_origin,
+                                          &g_ov.theme, g_ov.width, g_ov.height,
+                                          g_ov.bits, g_ov.width * 4,
+                                          g_ov.hover_button, g_ov.pressed_button,
+                                          has_original());
+    } else {
+        drawn = overlay_render(g_ov.text, &g_ov.theme, g_ov.width, g_ov.height,
+                               g_ov.bits, g_ov.width * 4, g_ov.hover_button,
+                               g_ov.pressed_button, has_original());
+    }
+    if (!drawn) {
         LOG_ERR("overlay", L"GDI+ 绘制浮层失败");
         return FALSE;
     }
@@ -321,76 +334,62 @@ static BOOL copy_to_clipboard(const wchar_t *text)
 }
 
 /* ================= 定位 ================= */
-
 static void place_near_cursor(void)
 {
-    POINT cursor;
-    GetCursorPos(&cursor);
-
-    /* 优先用"鼠标按下点"：用户按下左键的位置就是视线的落点，
-       把译文放在它右下方最符合直觉。 */
-    int pref_x, pref_y;
-    if (g_has_anchor) {
-        pref_x = g_anchor.left + scale_px(12);
-        pref_y = g_anchor.bottom - scale_px(2);
-    } else {
-        pref_x = cursor.x + scale_px(16);
-        pref_y = cursor.y + scale_px(16);
-    }
-
-    HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
-    if (g_has_anchor) {
-        POINT anchor_pt = { g_anchor.left, g_anchor.bottom };
-        monitor = MonitorFromPoint(anchor_pt, MONITOR_DEFAULTTONEAREST);
-    }
-
-    MONITORINFO mi;
-    mi.cbSize = sizeof(mi);
-    if (!GetMonitorInfoW(monitor, &mi)) {
-        g_ov.x = pref_x;
-        g_ov.y = pref_y;
-        return;
-    }
-
+    POINT cursor; GetCursorPos(&cursor);
     int margin = scale_px(8);
-    int x = pref_x;
-    int y = pref_y;
-
-    /* 右边放不下就左移贴住工作区右边 */
-    if (x + g_ov.width > mi.rcWork.right - margin) {
-        x = mi.rcWork.right - margin - g_ov.width;
-    }
-    /* 下方放不下就翻到选区上方 */
-    if (g_has_anchor && y + g_ov.height > mi.rcWork.bottom - margin) {
-        int above = g_anchor.bottom - scale_px(10) - g_ov.height;
-        if (above >= mi.rcWork.top + margin) {
-            y = above;
-        } else {
-            y = mi.rcWork.bottom - margin - g_ov.height;
+    HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    if (g_ov.positioned && !IsRectEmpty(&g_selection)) {
+        monitor = MonitorFromPoint((POINT){g_selection.left, g_selection.top}, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi; mi.cbSize = sizeof(mi);
+        if (GetMonitorInfoW(monitor, &mi)) {
+            g_ov.x = g_selection.left; g_ov.source_origin.x = 0;
+            int sw = g_selection.right - g_selection.left;
+            int sh = g_selection.bottom - g_selection.top;
+            if (g_selection.bottom + g_ov.theme.gap + g_ov.theme.toolbar_h + g_ov.theme.padding <= mi.rcWork.bottom - margin) {
+                g_ov.y = g_selection.top; g_ov.source_origin.y = 0;
+                SetRect(&g_ov.theme.toolbar_rect, g_ov.theme.toolbar_rect.left, sh + g_ov.theme.gap,
+                        g_ov.theme.toolbar_rect.right, sh + g_ov.theme.gap + g_ov.theme.toolbar_h);
+            } else {
+                g_ov.y = g_selection.top - g_ov.height;
+                g_ov.source_origin.y = g_ov.height - sh - g_ov.theme.padding;
+                SetRect(&g_ov.theme.toolbar_rect, g_ov.theme.toolbar_rect.left, 0,
+                        g_ov.theme.toolbar_rect.right, g_ov.theme.toolbar_h);
+                if (g_ov.y < mi.rcWork.top + margin) {
+                    g_ov.y = g_selection.top; g_ov.source_origin.y = 0;
+                    SetRect(&g_ov.theme.toolbar_rect, g_ov.theme.toolbar_rect.left, sh + g_ov.theme.gap,
+                            g_ov.theme.toolbar_rect.right, sh + g_ov.theme.gap + g_ov.theme.toolbar_h);
+                }
+            }
+            (void)sw;
+            return;
         }
     }
-
-    if (x < mi.rcWork.left + margin) x = mi.rcWork.left + margin;
-    if (y < mi.rcWork.top + margin)  y = mi.rcWork.top + margin;
-    if (x + g_ov.width > mi.rcWork.right - margin) {
-        x = mi.rcWork.right - margin - g_ov.width;
-    }
-    if (y + g_ov.height > mi.rcWork.bottom - margin) {
-        y = mi.rcWork.bottom - margin - g_ov.height;
-    }
-
-    g_ov.x = x;
-    g_ov.y = y;
+    BOOL have_selection = !IsRectEmpty(&g_selection);
+    int pref_x = g_has_anchor ? g_anchor.left + scale_px(12)
+                              : (have_selection ? g_selection.right + scale_px(4) : cursor.x + scale_px(16));
+    int pref_y = g_has_anchor ? g_anchor.bottom - scale_px(2)
+                              : (have_selection ? g_selection.bottom + scale_px(4) : cursor.y + scale_px(16));
+    if (have_selection && !g_has_anchor) monitor = MonitorFromPoint((POINT){g_selection.right, g_selection.bottom}, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi; mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(monitor, &mi)) { g_ov.x = pref_x; g_ov.y = pref_y; return; }
+    g_ov.x = pref_x; g_ov.y = pref_y;
+    if (g_ov.x + g_ov.width > mi.rcWork.right - margin) g_ov.x = mi.rcWork.right - margin - g_ov.width;
+    if (g_ov.y + g_ov.height > mi.rcWork.bottom - margin) g_ov.y = mi.rcWork.bottom - margin - g_ov.height;
+    if (g_ov.x < mi.rcWork.left + margin) g_ov.x = mi.rcWork.left + margin;
+    if (g_ov.y < mi.rcWork.top + margin) g_ov.y = mi.rcWork.top + margin;
 }
 
 void overlay_set_anchor(const RECT *selection)
 {
-    if (selection == NULL) {
-        g_has_anchor = FALSE;
-        return;
-    }
-    g_anchor = *selection;
-    g_has_anchor = TRUE;
+    if (selection == NULL) { g_has_anchor = FALSE; return; }
+    g_anchor = *selection; g_has_anchor = TRUE;
+}
+
+void overlay_set_selection(const RECT *selection)
+{
+    if (selection) g_selection = *selection;
+    else SetRectEmpty(&g_selection);
 }
 
 
@@ -523,48 +522,30 @@ static LRESULT CALLBACK overlay_wnd_proc(HWND hwnd, UINT msg,
         POINT client = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
         int id = hit_button(client);
         SetCapture(hwnd);
-
         if (id != OVERLAY_BTN_NONE) {
-            g_ov.pressed_button = id;
-            g_ov.hover_button = id;
-            SetCursor(LoadCursorW(NULL, IDC_HAND));
-            render_now();
-            return 0;
+            g_ov.pressed_button = id; g_ov.hover_button = id;
+            SetCursor(LoadCursorW(NULL, IDC_HAND)); render_now(); return 0;
         }
-
-        /* 只有文本区能拖动；工具栏空白处按住不动，避免误拖 */
         RECT text_box;
         int pad = g_ov.theme.padding;
-        text_box.left   = pad;
-        text_box.top    = pad;
-        text_box.right  = g_ov.width - pad;
+        text_box.left = pad; text_box.top = pad;
+        text_box.right = g_ov.width - pad;
         text_box.bottom = g_ov.height - pad - g_ov.theme.toolbar_h - g_ov.theme.gap;
-
-        if (PtInRect(&text_box, client)) {
-            begin_drag();
-        } else {
-            ReleaseCapture();
-        }
+        if (!g_ov.positioned && PtInRect(&text_box, client)) begin_drag();
+        else ReleaseCapture();
         return 0;
     }
 
     case WM_MOUSEMOVE: {
         POINT client = { GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
-
         if (g_ov.dragging) {
-            POINT cursor;
-            GetCursorPos(&cursor);
+            POINT cursor; GetCursorPos(&cursor);
             int nx = g_ov.drag_window.left + (cursor.x - g_ov.drag_cursor.x);
-            int ny = g_ov.drag_window.top  + (cursor.y - g_ov.drag_cursor.y);
-            SetWindowPos(hwnd, HWND_TOPMOST, nx, ny, 0, 0,
-                         SWP_NOSIZE | SWP_NOACTIVATE);
-            g_ov.x = nx;
-            g_ov.y = ny;
-            return 0;
+            int ny = g_ov.drag_window.top + (cursor.y - g_ov.drag_cursor.y);
+            SetWindowPos(hwnd, HWND_TOPMOST, nx, ny, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            g_ov.x = nx; g_ov.y = ny; return 0;
         }
-
-        update_hover(client, TRUE);
-        return 0;
+        update_hover(client, TRUE); return 0;
     }
 
     case WM_MOUSELEAVE:
@@ -621,6 +602,9 @@ static LRESULT CALLBACK overlay_wnd_proc(HWND hwnd, UINT msg,
         return 0;
     }
 
+    case WM_MOUSEWHEEL:
+        return 0;
+
     case WM_HOTKEY:
         if (wparam == HOTKEY_ID_OVERLAY) {
             LOG_INFO("overlay", L"ESC 关闭浮层");
@@ -668,6 +652,7 @@ static LRESULT CALLBACK overlay_wnd_proc(HWND hwnd, UINT msg,
         destroy_surface();
         heap_free(g_ov.translated_copy);
         heap_free(g_ov.original);
+        text_table_free(&g_ov.table);
 
         memset(&g_ov, 0, sizeof(g_ov));
 
@@ -711,11 +696,11 @@ static BOOL ensure_class(HINSTANCE instance)
 
 BOOL overlay_show(HWND notify, const wchar_t *text, const Config *cfg)
 {
-    return overlay_show_pair(notify, NULL, text, cfg);
+    return overlay_show_pair(notify, NULL, text, NULL, cfg);
 }
 
-BOOL overlay_show_pair(HWND notify, const wchar_t *original,
-                       const wchar_t *text, const Config *cfg)
+BOOL overlay_show_pair(HWND notify, const wchar_t *original, const wchar_t *text,
+                       TextTable *table, const Config *cfg)
 {
     if (text == NULL || text[0] == 0 || cfg == NULL) return FALSE;
 
@@ -735,6 +720,7 @@ BOOL overlay_show_pair(HWND notify, const wchar_t *original,
     POINT cursor;
     GetCursorPos(&cursor);
 
+    if (g_has_anchor) cursor = (POINT){g_anchor.left, g_anchor.top};
     HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi;
     mi.cbSize = sizeof(mi);
@@ -772,14 +758,29 @@ BOOL overlay_show_pair(HWND notify, const wchar_t *original,
     }
 
     int measured_w = 0, measured_h = 0;
-    if (!overlay_measure(text, &g_ov.theme, &measured_w, &measured_h)) {
+    BOOL measured = FALSE;
+    if (table && table->cells && table->regions && !IsRectEmpty(&g_selection)) {
+        int sw = g_selection.right - g_selection.left;
+        int sh = g_selection.bottom - g_selection.top;
+        measured = overlay_measure_positioned(table, &g_ov.theme, sw, sh,
+                                              &measured_w, &measured_h, &g_ov.theme.toolbar_rect);
+        if (measured) {
+            g_ov.table = *table; *table = (TextTable){0};
+            g_ov.positioned = TRUE;
+        } else {
+            text_table_free(table); *table = (TextTable){0};
+        }
+    } else if (table) {
+        /* 表格没有区域坐标时只保留纯文本回退，不再绘制旧网格。 */
+        text_table_free(table); *table = (TextTable){0};
+    }
+    if (!measured && !overlay_measure(text, &g_ov.theme, &measured_w, &measured_h)) {
         LOG_ERR("overlay", L"测量文字尺寸失败");
         DestroyWindow(hwnd);
         return FALSE;
     }
     g_ov.width = measured_w;
     g_ov.height = measured_h;
-
     g_ov.translated_copy = dup_wstr(text);
     if (g_ov.translated_copy == NULL) {
         LOG_ERR("overlay", L"复制译文失败");
@@ -831,6 +832,7 @@ BOOL overlay_show_pair(HWND notify, const wchar_t *original,
     LOG_INFO("overlay", L"浮层显示：%dx%d @ (%d,%d)，DPI %u，字号 %dpx",
              g_ov.width, g_ov.height, g_ov.x, g_ov.y, g_ov.dpi,
              g_ov.theme.font_px);
+    if (g_ov.table.cells) LOG_INFO("overlay", L"表格布局：%d 行 × %d 列", g_ov.table.rows, g_ov.table.cols);
     return TRUE;
 }
 
@@ -851,13 +853,14 @@ void overlay_set_auto_close(DWORD delay_ms)
     g_auto_close_ms = delay_ms;
 }
 
-/* 配置变了（比如改了译文背景透明度）：按新配置重建主题并立刻重绘。
-   浮层没显示时什么都不做，下次 overlay_show 自然会用新配置。 */
+/* 配置改了时重建主题并立即重绘。 */
 void overlay_refresh_theme(const Config *cfg)
 {
     if (g_ov.hwnd == NULL || cfg == NULL) return;
-
+    RECT toolbar = g_ov.theme.toolbar_rect;
     build_theme(cfg);
+    if (g_ov.positioned) g_ov.theme.toolbar_rect = toolbar;
+    g_ov.tip_text = NULL;
     render_now();
 }
 
