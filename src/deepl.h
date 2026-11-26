@@ -10,6 +10,10 @@
 BOOL deepl_key_is_valid(const wchar_t *key);
 BOOL deepl_target_language(const wchar_t *name, char out[DEEPL_TARGET_CAPACITY]);
 
+/* 真实端点主机：以 :fx 结尾的免费版密钥走 api-free.deepl.com，其余走 api.deepl.com。
+   返回静态字符串，不含 /v2 路径。 */
+const wchar_t *deepl_api_base(const wchar_t *key);
+
 /* 输出由调用方使用 heap_free 释放。 */
 void deepl_translate(const wchar_t *key, const wchar_t *target,
                      const wchar_t *source, int timeout_sec,

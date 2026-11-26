@@ -7,6 +7,7 @@
 #include "base64.h"
 #include "deepl.h"
 #include "providers.h"
+#include "youdao.h"
 #include "http.h"
 #include "util.h"
 
@@ -618,16 +619,33 @@ static BOOL translate_table(const Config *cfg, const cJSON *json, TranslationRes
             ok = deepl_translate_batch(cfg->deepl_api_key, cfg->target_language, sources + pos, size,
                                        cfg->request_timeout, translated + pos, &result->error);
         }
-    } else if (wstr_ieq(cfg->translation_provider, TRANSLATION_PROVIDER_GOOGLE)) {
+    } else if (wstr_ieq(cfg->translation_provider, TRANSLATION_PROVIDER_GOOGLE) ||
+               wstr_ieq(cfg->translation_provider, TRANSLATION_PROVIDER_BING)) {
+        BOOL use_bing = wstr_ieq(cfg->translation_provider, TRANSLATION_PROVIDER_BING);
         ok = TRUE;
         for (int pos = 0; ok && pos < count; ) {
             int size = count - pos;
             if (size > 50) size = 50;
-            ok = google_translate_batch(cfg->target_language, sources + pos, size,
-                                        cfg->request_timeout, translated + pos, &result->error);
+            ok = use_bing
+                 ? bing_translate_batch(cfg->target_language, sources + pos, size,
+                                        cfg->request_timeout, translated + pos,
+                                        &result->error)
+                 : google_translate_batch(cfg->target_language, sources + pos, size,
+                                          cfg->request_timeout, translated + pos,
+                                          &result->error);
             if (ok) pos += size;
         }
-        /* Google 失败即停止；不能把部分数组映射到表格。 */
+        /* 失败即停止；不能把部分数组映射到表格。 */
+    } else if (wstr_ieq(cfg->translation_provider, TRANSLATION_PROVIDER_YOUDAO)) {
+        ok = TRUE;
+        for (int pos = 0; ok && pos < count; pos += YOUDAO_MAX_TEXTS) {
+            int size = count - pos;
+            if (size > YOUDAO_MAX_TEXTS) size = YOUDAO_MAX_TEXTS;
+            ok = youdao_translate_batch(cfg->youdao_api_key, cfg->target_language,
+                                        sources + pos, size,
+                                        cfg->request_timeout, translated + pos,
+                                        &result->error);
+        }
     } else if (provider_is_openai(cfg) && request_is_configured(cfg, result)) {
         cJSON *array = cJSON_CreateArray();
         BOOL complete = array != NULL;
@@ -681,13 +699,22 @@ void translator_run_text(const Config *cfg, wchar_t *source, const cJSON *table_
                         cfg->request_timeout, &result->translated, &result->error);
         return;
     }
-    if (wstr_ieq(cfg->translation_provider, TRANSLATION_PROVIDER_GOOGLE)) {
+    if (wstr_ieq(cfg->translation_provider, TRANSLATION_PROVIDER_GOOGLE) ||
+        wstr_ieq(cfg->translation_provider, TRANSLATION_PROVIDER_BING)) {
         const wchar_t *sources[] = {source};
         wchar_t *translated[1] = {0};
-        if (google_translate_batch(cfg->target_language, sources, 1,
-                                   cfg->request_timeout, translated, &result->error)) {
-            result->translated = translated[0];
-        }
+        BOOL use_bing = wstr_ieq(cfg->translation_provider, TRANSLATION_PROVIDER_BING);
+        BOOL ok = use_bing
+                  ? bing_translate_batch(cfg->target_language, sources, 1,
+                                         cfg->request_timeout, translated, &result->error)
+                  : google_translate_batch(cfg->target_language, sources, 1,
+                                           cfg->request_timeout, translated, &result->error);
+        if (ok) result->translated = translated[0];
+        return;
+    }
+    if (wstr_ieq(cfg->translation_provider, TRANSLATION_PROVIDER_YOUDAO)) {
+        youdao_translate(cfg->youdao_api_key, cfg->target_language, source,
+                         cfg->request_timeout, &result->translated, &result->error);
         return;
     }
     if (!provider_is_openai(cfg)) {

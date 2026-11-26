@@ -10,7 +10,13 @@
 #include <string.h>
 #include <wchar.h>
 
-static const wchar_t *DEFAULT_API_BASE   = L"https://api.openai.com/v1";
+/* 默认地址只在 providers.c 里写一份，这里取 OpenAI 兼容那条的真实值 */
+static const wchar_t *DEFAULT_API_BASE(void)
+{
+    const ProviderInfo *info = provider_info(TRANSLATION_PROVIDER_OPENAI);
+    return info ? info->base_url : L"https://api.openai.com/v1";
+}
+
 static const wchar_t *DEFAULT_MODEL      = L"gpt-4o-mini";
 static const wchar_t *DEFAULT_HOTKEY     = L"ctrl+alt+d";
 static const wchar_t *DEFAULT_EXIT_KEY   = L"ctrl+alt+shift+q";
@@ -23,7 +29,7 @@ void config_defaults(Config *cfg)
     if (cfg == NULL) return;
     memset(cfg, 0, sizeof(*cfg));
 
-    wstr_copy(cfg->api_base_url, 512, DEFAULT_API_BASE);
+    wstr_copy(cfg->api_base_url, 512, DEFAULT_API_BASE());
     cfg->api_key[0] = 0;
     wstr_copy(cfg->model, 128, DEFAULT_MODEL);
     wstr_copy(cfg->translation_provider, 32, TRANSLATION_PROVIDER_OPENAI);
@@ -181,9 +187,10 @@ ConfigLoadStatus config_load(Config *cfg, const wchar_t *path)
 
     cJSON *item;
 
-    get_string(root, "api_base_url", cfg->api_base_url, 512, DEFAULT_API_BASE);
+    get_string(root, "api_base_url", cfg->api_base_url, 512, DEFAULT_API_BASE());
     get_string(root, "api_key",      cfg->api_key,      512, L"");
     get_string(root, "deepl_api_key", cfg->deepl_api_key, 512, L"");
+    get_string(root, "youdao_api_key", cfg->youdao_api_key, 512, L"");
     get_string(root, "model",        cfg->model,        128, DEFAULT_MODEL);
     get_string(root, "translation_provider", cfg->translation_provider, 32, L"");
     get_string(root, "hotkey",       cfg->hotkey,        64, DEFAULT_HOTKEY);
@@ -193,9 +200,16 @@ ConfigLoadStatus config_load(Config *cfg, const wchar_t *path)
     get_string(root, "overlay_fg",   cfg->overlay_fg,    16, DEFAULT_OVERLAY_FG);
     if (cfg->translation_provider[0] == 0 || !provider_id_is_known(cfg->translation_provider)) {
         wstr_copy(cfg->translation_provider, 32, provider_default_for(cfg));
+    } else if (!provider_is_visible(cfg->translation_provider)) {
+        /* 隐藏的通道不再可用：回退到默认项，下次保存才落盘 */
+        wchar_t hidden[32];
+        wstr_copy(hidden, 32, cfg->translation_provider);
+        const wchar_t *fallback = provider_default_for(cfg);
+        wstr_copy(cfg->translation_provider, 32, fallback);
+        LOG_INFO("config", L"提供商 %ls 暂时隐藏，本次改用 %ls", hidden, fallback);
     }
     /* 字符串项兜底：空值退回默认（api_key 例外，允许为空） */
-    if (cfg->api_base_url[0] == 0) wstr_copy(cfg->api_base_url, 512, DEFAULT_API_BASE);
+    if (cfg->api_base_url[0] == 0) wstr_copy(cfg->api_base_url, 512, DEFAULT_API_BASE());
     if (cfg->model[0] == 0)        wstr_copy(cfg->model, 128, DEFAULT_MODEL);
     if (cfg->hotkey[0] == 0)       wstr_copy(cfg->hotkey, 64, DEFAULT_HOTKEY);
     if (cfg->exit_hotkey[0] == 0)  wstr_copy(cfg->exit_hotkey, 64, DEFAULT_EXIT_KEY);
@@ -230,6 +244,7 @@ BOOL config_save(const Config *cfg, const wchar_t *path)
     u8 = u16_to_u8(cfg->api_base_url); cJSON_AddStringToObject(root, "api_base_url", u8 ? u8 : ""); heap_free(u8);
     u8 = u16_to_u8(cfg->api_key);      cJSON_AddStringToObject(root, "api_key",      u8 ? u8 : ""); heap_free(u8);
     u8 = u16_to_u8(cfg->deepl_api_key); cJSON_AddStringToObject(root, "deepl_api_key", u8 ? u8 : ""); heap_free(u8);
+    u8 = u16_to_u8(cfg->youdao_api_key); cJSON_AddStringToObject(root, "youdao_api_key", u8 ? u8 : ""); heap_free(u8);
     u8 = u16_to_u8(cfg->model);        cJSON_AddStringToObject(root, "model",        u8 ? u8 : ""); heap_free(u8);
     u8 = u16_to_u8(cfg->translation_provider); cJSON_AddStringToObject(root, "translation_provider", u8 ? u8 : ""); heap_free(u8);
     u8 = u16_to_u8(cfg->hotkey);       cJSON_AddStringToObject(root, "hotkey",       u8 ? u8 : ""); heap_free(u8);

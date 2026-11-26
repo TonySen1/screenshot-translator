@@ -22,7 +22,7 @@
 #define TRAY_ICON_ID           1
 
 #define APP_NAME               L"截图翻译"
-#define APP_VERSION            L"2.1.0"
+#define APP_VERSION            L"2.1.1"
 #define APP_CLASS              L"ScreenshotTranslatorMsgWnd"
 #define APP_MUTEX              L"Local\\ScreenshotTranslatorC_SingleInstance"
 

@@ -12,6 +12,7 @@
 #include "app.h"
 #include "deepl.h"
 #include "providers.h"
+#include "youdao.h"
 #include "hotkey.h"
 #include "overlay_gdiplus.h"
 #include "translator.h"
@@ -26,17 +27,21 @@
 
 #define SETTINGS_CLASS L"ScreenshotTranslatorSettings"
 
-/* 控件 ID */
+/* 控件 ID。每个字段只有一份：切提供商时按 providers.c 里的注册表重填，
+   不再为 DeepL / OpenAI 各留一行专用控件。 */
 enum {
     IDC_LBL_PROVIDER,
     IDC_COMBO_PROVIDER,
     IDC_LBL_BASE,
     IDC_EDIT_BASE,
+    IDC_BTN_TEST,
     IDC_LBL_KEY,
     IDC_EDIT_KEY,
+    IDC_BTN_KEY_PAGE,
     IDC_LBL_MODEL,
     IDC_EDIT_MODEL,
     IDC_BTN_MODELS,
+    IDC_LBL_PROVIDER_HINT,
     IDC_LBL_LANG,
     IDC_EDIT_LANG,
 
@@ -47,12 +52,8 @@ enum {
     IDC_LBL_HINT,
 
     IDC_LBL_STATUS,
-    IDC_BTN_TEST,
     IDC_BTN_SAVE,
-    IDC_BTN_CANCEL,
-    IDC_LBL_DEEPL_KEY,
-    IDC_EDIT_DEEPL_KEY,
-    IDC_BTN_DEEPL_TEST
+    IDC_BTN_CANCEL
 };
 
 /* 工作线程 -> 窗口的私有消息 */
@@ -61,19 +62,21 @@ enum {
 #define NET_NONE     0
 #define NET_TEST     1
 #define NET_MODELS   2
-#define NET_DEEPL    3
 
 typedef struct NetJob {
     int        kind;
     HWND       hwnd;        /* 结果投递目标 */
+    wchar_t   *provider;    /* 按下按钮时选中的提供商 */
     wchar_t   *base_url;
     wchar_t   *api_key;
     wchar_t   *model;
+    wchar_t   *target_language;
     int        timeout_sec;
 } NetJob;
 
 typedef struct NetResult {
     int      kind;
+    wchar_t *provider;      /* 回显用：哪个提供商的结果 */
     wchar_t *text;          /* 成功：模型列表（换行分隔） */
     wchar_t *error;         /* 失败：中文原因 */
 } NetResult;
@@ -98,6 +101,15 @@ typedef struct SettingsState {
     /* 网络请求进行中，防止重复点击 */
     BOOL    net_busy;
     HANDLE  net_thread;
+
+    /* 当前编辑框里这组值属于哪个提供商，以及各提供商自己的草稿。
+       来回切提供商时把输入搬进搬出，已填的密钥不会互相覆盖。 */
+    wchar_t shown_provider[32];
+    wchar_t draft_deepl_key[512];
+    wchar_t draft_openai_key[512];
+    wchar_t draft_youdao_key[512];
+    wchar_t draft_openai_base[512];
+    wchar_t draft_openai_model[128];
 
     /* 深色主题的画刷，窗口销毁时释放 */
     HBRUSH  bg_brush;
@@ -305,6 +317,132 @@ static BOOL capture_combination(UINT vk, wchar_t *out, size_t count)
     return out[0] != 0;
 }
 
+/* ---------- 提供商字段 ---------- */
+
+static BOOL is_http_url(const wchar_t *text)
+{
+    return _wcsnicmp(text, L"http://", 7) == 0 ||
+           _wcsnicmp(text, L"https://", 8) == 0;
+}
+
+/* DeepL 的真实端点随密钥套餐变化：免费版密钥（:fx 结尾）走 api-free。 */
+static const wchar_t *deepl_endpoint(const wchar_t *key)
+{
+    static wchar_t buffer[96];
+    _snwprintf_s(buffer, 96, _TRUNCATE, L"%ls/v2", deepl_api_base(key));
+    return buffer;
+}
+
+/* 把当前这组输入存回它所属提供商的草稿 */
+static void save_shown_fields(void)
+{
+    const ProviderInfo *info = provider_info(g_st.shown_provider);
+    if (info == NULL || g_st.hwnd == NULL) return;
+
+    if (wstr_ieq(info->id, TRANSLATION_PROVIDER_OPENAI)) {
+        read_trimmed(IDC_EDIT_BASE, g_st.draft_openai_base, 512);
+        read_trimmed(IDC_EDIT_KEY, g_st.draft_openai_key, 512);
+        read_trimmed(IDC_EDIT_MODEL, g_st.draft_openai_model, 128);
+    } else if (wstr_ieq(info->id, TRANSLATION_PROVIDER_DEEPL)) {
+        read_trimmed(IDC_EDIT_KEY, g_st.draft_deepl_key, 512);
+    } else if (wstr_ieq(info->id, TRANSLATION_PROVIDER_YOUDAO)) {
+        read_trimmed(IDC_EDIT_KEY, g_st.draft_youdao_key, 512);
+    }
+}
+
+/* 按"当前提供商 + 是否正在请求"决定哪些控件可用 */
+static void refresh_enable_states(void)
+{
+    if (g_st.hwnd == NULL) return;
+
+    const ProviderInfo *info = provider_info(g_st.shown_provider);
+    BOOL ready = info != NULL;
+    BOOL busy = g_st.net_busy;
+
+    /* 地址对固定端点的提供商只读回显，但仍可选中复制 */
+    SendDlgItemMessageW(g_st.hwnd, IDC_EDIT_BASE, EM_SETREADONLY,
+                        (ready && info->editable_base && !busy) ? FALSE : TRUE, 0);
+    EnableWindow(GetDlgItem(g_st.hwnd, IDC_EDIT_KEY),
+                 ready && info->needs_key && !busy);
+    EnableWindow(GetDlgItem(g_st.hwnd, IDC_EDIT_MODEL),
+                 ready && info->needs_model && !busy);
+    EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_MODELS),
+                 ready && info->needs_model && !busy);
+    /* 未实现的提供商也允许点：点一下就能看到那条服务具体缺什么 */
+    EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_TEST), ready && !busy);
+    EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_KEY_PAGE),
+                 ready && info->key_url != NULL && !busy);
+}
+
+/* 切提供商：把旧输入收进草稿，再把新提供商的真实地址与草稿填回控件 */
+static void apply_provider_controls(void)
+{
+    if (g_st.hwnd == NULL) return;
+
+    int index = (int)SendDlgItemMessageW(g_st.hwnd, IDC_COMBO_PROVIDER,
+                                         CB_GETCURSEL, 0, 0);
+    const ProviderInfo *info = provider_visible_at(index);
+    if (info == NULL) return;
+
+    if (g_st.shown_provider[0] != 0 &&
+        !wstr_ieq(g_st.shown_provider, info->id)) {
+        save_shown_fields();
+    }
+    wstr_copy(g_st.shown_provider, 32, info->id);
+
+    SetDlgItemTextW(g_st.hwnd, IDC_LBL_KEY, info->key_label);
+    SetDlgItemTextW(g_st.hwnd, IDC_LBL_PROVIDER_HINT, info->hint ? info->hint : L"");
+    SetDlgItemTextW(g_st.hwnd, IDC_BTN_KEY_PAGE, L"申请地址");
+
+    if (wstr_ieq(info->id, TRANSLATION_PROVIDER_OPENAI)) {
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_BASE, g_st.draft_openai_base);
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_KEY, g_st.draft_openai_key);
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_MODEL, g_st.draft_openai_model);
+    } else if (wstr_ieq(info->id, TRANSLATION_PROVIDER_DEEPL)) {
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_BASE, deepl_endpoint(g_st.draft_deepl_key));
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_KEY, g_st.draft_deepl_key);
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_MODEL, L"");
+    } else if (wstr_ieq(info->id, TRANSLATION_PROVIDER_YOUDAO)) {
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_BASE, info->base_url);
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_KEY, g_st.draft_youdao_key);
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_MODEL, L"");
+    } else {
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_BASE, info->base_url);
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_KEY, L"");
+        /* 模型框只在 OpenAI 兼容下有意义；草稿里存着，切回去会自动还原 */
+        SetDlgItemTextW(g_st.hwnd, IDC_EDIT_MODEL, L"");
+    }
+
+    refresh_enable_states();
+}
+
+/* DeepL 下改密钥就同步端点：:fx 结尾 -> api-free，其余 -> 付费端点 */
+static void refresh_deepl_endpoint(void)
+{
+    if (g_st.hwnd == NULL) return;
+    if (!wstr_ieq(g_st.shown_provider, TRANSLATION_PROVIDER_DEEPL)) return;
+
+    wchar_t key[512] = L"";
+    read_trimmed(IDC_EDIT_KEY, key, 512);
+    SetDlgItemTextW(g_st.hwnd, IDC_EDIT_BASE, deepl_endpoint(key));
+}
+
+static void open_provider_key_page(void)
+{
+    const ProviderInfo *info = provider_info(g_st.shown_provider);
+    if (info == NULL) return;
+    if (info->key_url == NULL) {
+        set_status(L"该翻译服务不需要申请密钥");
+        return;
+    }
+
+    LOG_INFO("settings", L"打开 %ls 密钥申请页：%ls", info->name, info->key_url);
+    if ((INT_PTR)ShellExecuteW(NULL, L"open", info->key_url, NULL, NULL,
+                               SW_SHOWNORMAL) <= 32) {
+        set_status(L"打不开浏览器；申请地址已写在下方提示里");
+    }
+}
+
 /* ---------- 网络 ---------- */
 
 static DWORD WINAPI net_thread(LPVOID param)
@@ -314,106 +452,198 @@ static DWORD WINAPI net_thread(LPVOID param)
     NetResult *result = (NetResult *)heap_alloc(sizeof(*result));
     if (result != NULL) {
         result->kind = job->kind;
+        result->provider = dup_wstr(job->provider);
         if (job->kind == NET_MODELS) {
             translator_fetch_models(job->base_url, job->api_key,
                                     job->timeout_sec,
                                     &result->text, &result->error);
-        } else if (job->kind == NET_DEEPL) {
+        } else if (wstr_ieq(job->provider, TRANSLATION_PROVIDER_DEEPL)) {
             result->error = deepl_test_connection(job->api_key, job->timeout_sec);
-        } else {
+        } else if (wstr_ieq(job->provider, TRANSLATION_PROVIDER_GOOGLE)) {
+            result->error = google_test_connection(job->target_language,
+                                                  job->timeout_sec);
+        } else if (wstr_ieq(job->provider, TRANSLATION_PROVIDER_BING)) {
+            result->error = bing_test_connection(job->target_language,
+                                                job->timeout_sec);
+        } else if (wstr_ieq(job->provider, TRANSLATION_PROVIDER_YOUDAO)) {
+            result->error = youdao_test_connection(job->api_key, job->timeout_sec);
+        } else if (wstr_ieq(job->provider, TRANSLATION_PROVIDER_OPENAI)) {
             result->error = translator_test_connection(job->base_url, job->api_key,
                                                        job->model,
                                                        job->timeout_sec);
+        } else {
+            result->error = provider_unavailable_error(job->provider);
         }
     }
 
     HWND target = job->hwnd;
+    heap_free(job->provider);
     heap_free(job->base_url);
     heap_free(job->api_key);
     heap_free(job->model);
+    heap_free(job->target_language);
     heap_free(job);
 
     PostMessageW(target, WM_SETTINGS_NET_DONE, 0, (LPARAM)result);
     return 0;
 }
 
-static void start_net_job(int kind)
+static NetJob *new_job(int kind)
+{
+    NetJob *job = (NetJob *)heap_alloc(sizeof(*job));
+    if (job == NULL) {
+        set_status(L"内存不足");
+        return NULL;
+    }
+    memset(job, 0, sizeof(*job));
+    job->kind = kind;
+    job->hwnd = g_st.hwnd;
+    job->timeout_sec = 20;
+    return job;
+}
+
+static void free_job(NetJob *job)
+{
+    if (job == NULL) return;
+    heap_free(job->provider);
+    heap_free(job->base_url);
+    heap_free(job->api_key);
+    heap_free(job->model);
+    heap_free(job->target_language);
+    heap_free(job);
+}
+
+/* 所有权交给工作线程；失败时自己回收 */
+static void begin_net_job(NetJob *job)
+{
+    g_st.net_busy = TRUE;
+    g_st.net_thread = CreateThread(NULL, 0, net_thread, job, 0, NULL);
+    if (g_st.net_thread == NULL) {
+        g_st.net_busy = FALSE;
+        free_job(job);
+        set_status(L"无法启动网络线程");
+        return;
+    }
+    refresh_enable_states();
+}
+
+/* 按当前选中的提供商发一次连通性检查：DeepL 查用量、Google 发一条短文本、
+   OpenAI 兼容发一次最小 chat 请求，未实现的提供商当场给出原因。 */
+static void start_test_job(void)
 {
     if (g_st.net_busy) {
         set_status(L"上一个请求还没结束，请稍候");
         return;
     }
 
-    wchar_t base[512] = L"", key[512] = L"", model[128] = L"";
-    if (kind == NET_DEEPL) {
-        if (!read_trimmed(IDC_EDIT_DEEPL_KEY, key, 512) || !deepl_key_is_valid(key)) {
-            set_status(L"请粘贴有效的 DeepL 密钥（不含空格）");
-            SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_DEEPL_KEY));
-            return;
-        }
-    } else {
+    const ProviderInfo *info = provider_visible_at((int)SendDlgItemMessageW(
+        g_st.hwnd, IDC_COMBO_PROVIDER, CB_GETCURSEL, 0, 0));
+    if (info == NULL) {
+        set_status(L"请选择翻译服务");
+        return;
+    }
+    if (!info->implemented) {
+        wchar_t *reason = provider_unavailable_error(info->id);
+        set_status(reason ? reason : L"该翻译服务暂不可用");
+        heap_free(reason);
+        return;
+    }
+
+    wchar_t base[512] = L"", key[512] = L"", model[128] = L"", lang[64] = L"";
+    if (info->editable_base) {
         if (!read_trimmed(IDC_EDIT_BASE, base, 512)) {
-            set_status(L"请先填写 OpenAI 接口地址");
+            set_status(L"请先填写接口地址");
             SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_BASE));
             return;
         }
-        if (_wcsnicmp(base, L"http://", 7) != 0 && _wcsnicmp(base, L"https://", 8) != 0) {
-            set_status(L"API 地址必须以 http:// 或 https:// 开头");
+        if (!is_http_url(base)) {
+            set_status(L"接口地址必须以 http:// 或 https:// 开头");
+            SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_BASE));
             return;
         }
-        read_trimmed(IDC_EDIT_KEY, key, 512);
-        read_trimmed(IDC_EDIT_MODEL, model, 128);
-        if (kind == NET_TEST && !key[0]) {
-            set_status(L"请先填写 OpenAI API Key");
-            SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_KEY));
-            return;
-        }
-        if (kind == NET_TEST && !model[0]) {
-            set_status(L"请先填写模型名");
-            SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_MODEL));
-            return;
-        }
+    } else {
+        wstr_copy(base, 512, info->base_url);
     }
 
-    NetJob *job = (NetJob *)heap_alloc(sizeof(*job));
-    if (job == NULL) {
-        set_status(L"内存不足");
+    if (info->needs_key && !read_trimmed(IDC_EDIT_KEY, key, 512)) {
+        wchar_t text[160];
+        _snwprintf_s(text, 160, _TRUNCATE, L"请先填写%ls", info->key_label);
+        set_status(text);
+        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_KEY));
         return;
     }
+    if (info->needs_model && !read_trimmed(IDC_EDIT_MODEL, model, 128)) {
+        set_status(L"请先填写模型名");
+        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_MODEL));
+        return;
+    }
+    if (!read_trimmed(IDC_EDIT_LANG, lang, 64)) {
+        wstr_copy(lang, 64, L"中文");
+    }
 
-    job->kind = kind;
-    job->hwnd = g_st.hwnd;
-    job->timeout_sec = 20;
+    NetJob *job = new_job(NET_TEST);
+    if (job == NULL) return;
+    job->provider = dup_wstr(info->id);
     job->base_url = dup_wstr(base);
     job->api_key = dup_wstr(key);
     job->model = dup_wstr(model);
-
-    if (job->base_url == NULL || job->api_key == NULL || job->model == NULL) {
-        heap_free(job->base_url);
-        heap_free(job->api_key);
-        heap_free(job->model);
-        heap_free(job);
+    job->target_language = dup_wstr(lang);
+    if (job->provider == NULL || job->base_url == NULL || job->api_key == NULL ||
+        job->model == NULL || job->target_language == NULL) {
+        free_job(job);
         set_status(L"内存不足");
         return;
     }
 
-    g_st.net_busy = TRUE;
-    g_st.net_thread = CreateThread(NULL, 0, net_thread, job, 0, NULL);
-    if (g_st.net_thread == NULL) {
-        g_st.net_busy = FALSE;
-        heap_free(job->base_url);
-        heap_free(job->api_key);
-        heap_free(job->model);
-        heap_free(job);
-        set_status(L"无法启动网络线程");
+    wchar_t text[192];
+    _snwprintf_s(text, 192, _TRUNCATE, L"正在测试 %ls 连接…", info->name);
+    set_status(text);
+    begin_net_job(job);
+}
+
+static void start_models_job(void)
+{
+    if (g_st.net_busy) {
+        set_status(L"上一个请求还没结束，请稍候");
         return;
     }
 
-    EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_TEST), FALSE);
-    EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_MODELS), FALSE);
-    EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_DEEPL_TEST), FALSE);
-    set_status(kind == NET_DEEPL ? L"正在测试 DeepL 连接…" :
-               kind == NET_TEST ? L"正在测试 OpenAI 连接…" : L"正在拉取模型列表…");
+    const ProviderInfo *info = provider_visible_at((int)SendDlgItemMessageW(
+        g_st.hwnd, IDC_COMBO_PROVIDER, CB_GETCURSEL, 0, 0));
+    if (info == NULL || !wstr_ieq(info->id, TRANSLATION_PROVIDER_OPENAI)) {
+        set_status(L"只有 OpenAI 兼容服务能拉模型列表，请先切换提供商");
+        return;
+    }
+
+    wchar_t base[512] = L"", key[512] = L"";
+    if (!read_trimmed(IDC_EDIT_BASE, base, 512)) {
+        set_status(L"请先填写接口地址");
+        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_BASE));
+        return;
+    }
+    if (!is_http_url(base)) {
+        set_status(L"接口地址必须以 http:// 或 https:// 开头");
+        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_BASE));
+        return;
+    }
+    read_trimmed(IDC_EDIT_KEY, key, 512);
+
+    NetJob *job = new_job(NET_MODELS);
+    if (job == NULL) return;
+    job->provider = dup_wstr(info->id);
+    job->base_url = dup_wstr(base);
+    job->api_key = dup_wstr(key);
+    job->model = dup_wstr(L"");
+    job->target_language = dup_wstr(L"");
+    if (job->provider == NULL || job->base_url == NULL || job->api_key == NULL ||
+        job->model == NULL || job->target_language == NULL) {
+        free_job(job);
+        set_status(L"内存不足");
+        return;
+    }
+
+    set_status(L"正在拉取模型列表…");
+    begin_net_job(job);
 }
 
 /* 工作线程把结果送回来 */
@@ -425,11 +655,7 @@ static void on_net_done(NetResult *result)
         g_st.net_thread = NULL;
     }
 
-    if (g_st.hwnd != NULL) {
-        EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_TEST), TRUE);
-        EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_MODELS), TRUE);
-        EnableWindow(GetDlgItem(g_st.hwnd, IDC_BTN_DEEPL_TEST), TRUE);
-    }
+    refresh_enable_states();
 
     if (result == NULL) {
         set_status(L"请求失败：内部错误");
@@ -439,8 +665,17 @@ static void on_net_done(NetResult *result)
     if (result->error != NULL) {
         set_status(result->error);
         LOG_WARN("settings", L"网络操作失败：%ls", result->error);
-    } else if (result->kind == NET_TEST || result->kind == NET_DEEPL) {
-        set_status(result->kind == NET_DEEPL ? L"DeepL 连接成功，密钥可用" : L"OpenAI 连接成功，配置可用");
+    } else if (result->kind == NET_TEST) {
+        const ProviderInfo *info = provider_info(result->provider);
+        wchar_t text[192];
+        if (info != NULL && !info->needs_key) {
+            _snwprintf_s(text, 192, _TRUNCATE, L"%ls 连接成功（免密钥可用）",
+                         info->name);
+        } else {
+            _snwprintf_s(text, 192, _TRUNCATE, L"%ls 连接成功，密钥与配置可用",
+                         info ? info->name : L"服务");
+        }
+        set_status(text);
     } else {
         /* 模型列表：拿第一条填进模型框，其余弹窗让用户选 */
         wchar_t *first = result->text;
@@ -482,8 +717,12 @@ static void on_net_done(NetResult *result)
                 heap_free(choice);
             }
         }
+
+        /* 记回草稿：之后切到别的提供商再切回来，模型框不会退回旧值 */
+        read_trimmed(IDC_EDIT_MODEL, g_st.draft_openai_model, 128);
     }
 
+    heap_free(result->provider);
     heap_free(result->text);
     heap_free(result->error);
     heap_free(result);
@@ -510,80 +749,69 @@ static void commit_recorded_hotkey(const wchar_t *combo)
 
 /* ---------- 校验与保存 ---------- */
 
-static const wchar_t *provider_id_from_index(int index)
-{
-    static const wchar_t *const ids[] = {
-        TRANSLATION_PROVIDER_DEEPL, TRANSLATION_PROVIDER_OPENAI,
-        TRANSLATION_PROVIDER_GOOGLE, TRANSLATION_PROVIDER_TENCENT,
-        TRANSLATION_PROVIDER_BING, TRANSLATION_PROVIDER_MS,
-        TRANSLATION_PROVIDER_YOUDAO, TRANSLATION_PROVIDER_YANDEX
-    };
-    return (index >= 0 && index < (int)(sizeof(ids) / sizeof(ids[0])))
-           ? ids[index] : NULL;
-}
-
-static void update_provider_label(void)
-{
-    int index = (int)SendDlgItemMessageW(g_st.hwnd, IDC_COMBO_PROVIDER,
-                                         CB_GETCURSEL, 0, 0);
-    const wchar_t *label = L"服务密钥";
-    switch (index) {
-    case 0: label = L"DeepL 密钥"; break;
-    case 1: label = L"OpenAI 密钥"; break;
-    case 2: label = L"Google Web"; break;
-    case 3: label = L"腾讯 TranSmart"; break;
-    case 4: label = L"Bing 网页"; break;
-    case 5: label = L"Microsoft"; break;
-    case 6: label = L"有道网页"; break;
-    case 7: label = L"Yandex"; break;
-    default: break;
-    }
-    SetDlgItemTextW(g_st.hwnd, IDC_LBL_DEEPL_KEY, label);
-}
-
 static BOOL validate_and_save(void)
 {
     /* 保存前必须先退出录制，否则热键还处于暂停状态 */
     stop_recording();
 
-    wchar_t base[512], key[512], model[128], hotkey[64], exitkey[64], lang[64];
-    wchar_t deepl_key[512];
+    wchar_t hotkey[64], exitkey[64], lang[64];
     int provider_index = (int)SendDlgItemMessageW(g_st.hwnd, IDC_COMBO_PROVIDER, CB_GETCURSEL, 0, 0);
-    const wchar_t *provider = provider_id_from_index(provider_index);
-    if (!provider) {
+    const ProviderInfo *info = provider_visible_at(provider_index);
+    if (info == NULL) {
         set_status(L"请选择翻译服务");
         return FALSE;
     }
-    if (!wstr_ieq(provider, TRANSLATION_PROVIDER_DEEPL) &&
-        !wstr_ieq(provider, TRANSLATION_PROVIDER_OPENAI) &&
-        !wstr_ieq(provider, TRANSLATION_PROVIDER_GOOGLE)) {
-        wchar_t *unavailable = provider_unavailable_error(provider);
+    if (!info->implemented) {
+        wchar_t *unavailable = provider_unavailable_error(info->id);
         set_status(unavailable ? unavailable : L"该翻译服务暂不可用");
         heap_free(unavailable);
         return FALSE;
     }
-    read_trimmed(IDC_EDIT_DEEPL_KEY, deepl_key, 512);
-    if (*deepl_key && !deepl_key_is_valid(deepl_key)) {
-        set_status(L"DeepL 密钥包含无效字符，请重新粘贴");
-        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_DEEPL_KEY));
+
+    /* 先把当前这组输入落到草稿，再统一写配置：
+       来回切提供商时，已填过的密钥不会被另一家的空值覆盖。 */
+    save_shown_fields();
+
+    if (info->needs_key) {
+        const wchar_t *field = wstr_ieq(info->id, TRANSLATION_PROVIDER_DEEPL)
+                               ? g_st.draft_deepl_key
+                               : wstr_ieq(info->id, TRANSLATION_PROVIDER_YOUDAO)
+                                 ? g_st.draft_youdao_key : g_st.draft_openai_key;
+        if (!field[0]) {
+            wchar_t text[160];
+            _snwprintf_s(text, 160, _TRUNCATE, L"请填写%ls", info->key_label);
+            set_status(text);
+            SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_KEY));
+            return FALSE;
+        }
+    }
+    if (wstr_ieq(info->id, TRANSLATION_PROVIDER_DEEPL) &&
+        !deepl_key_is_valid(g_st.draft_deepl_key)) {
+        set_status(L"DeepL 密钥包含无效字符（不能有空格），请重新粘贴");
+        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_KEY));
+        return FALSE;
+    }
+    if (wstr_ieq(info->id, TRANSLATION_PROVIDER_YOUDAO) &&
+        !youdao_key_is_valid(g_st.draft_youdao_key)) {
+        set_status(L"有道凭据要写成「应用ID:应用密钥」，中间一个英文冒号，不能有空格");
+        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_KEY));
         return FALSE;
     }
 
-    if (!read_trimmed(IDC_EDIT_BASE, base, 512)) {
-        set_status(L"API 地址不能为空");
-        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_BASE));
-        return FALSE;
-    }
-    if (_wcsnicmp(base, L"http://", 7) != 0 &&
-        _wcsnicmp(base, L"https://", 8) != 0) {
-        set_status(L"API 地址必须以 http:// 或 https:// 开头");
-        SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_BASE));
-        return FALSE;
+    if (info->editable_base) {
+        if (!g_st.draft_openai_base[0]) {
+            set_status(L"接口地址不能为空");
+            SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_BASE));
+            return FALSE;
+        }
+        if (!is_http_url(g_st.draft_openai_base)) {
+            set_status(L"接口地址必须以 http:// 或 https:// 开头");
+            SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_BASE));
+            return FALSE;
+        }
     }
 
-    read_trimmed(IDC_EDIT_KEY, key, 512);
-
-    if (!read_trimmed(IDC_EDIT_MODEL, model, 128)) {
+    if (info->needs_model && !g_st.draft_openai_model[0]) {
         set_status(L"模型名不能为空");
         SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_MODEL));
         return FALSE;
@@ -596,8 +824,8 @@ static BOOL validate_and_save(void)
         return FALSE;
     }
     char deepl_lang[DEEPL_TARGET_CAPACITY];
-    if (wstr_ieq(provider, TRANSLATION_PROVIDER_DEEPL) &&
-        *deepl_key && !deepl_target_language(lang, deepl_lang)) {
+    if (wstr_ieq(info->id, TRANSLATION_PROVIDER_DEEPL) &&
+        !deepl_target_language(lang, deepl_lang)) {
         set_status(L"DeepL 目标语言请填中文或语言代码，如 ZH-HANS");
         SetFocus(GetDlgItem(g_st.hwnd, IDC_EDIT_LANG));
         return FALSE;
@@ -660,15 +888,16 @@ static BOOL validate_and_save(void)
         }
     }
 
-    /* 写进编辑副本 */
-    wstr_copy(g_st.edited.api_base_url, 512, base);
-    wstr_copy(g_st.edited.api_key,      512, key);
-    wstr_copy(g_st.edited.deepl_api_key, 512, deepl_key);
-    wstr_copy(g_st.edited.model,        128, model);
+    /* 写进编辑副本：两家密钥各占自己的槽位，互不覆盖 */
+    wstr_copy(g_st.edited.api_base_url,  512, g_st.draft_openai_base);
+    wstr_copy(g_st.edited.api_key,       512, g_st.draft_openai_key);
+    wstr_copy(g_st.edited.deepl_api_key, 512, g_st.draft_deepl_key);
+    wstr_copy(g_st.edited.youdao_api_key, 512, g_st.draft_youdao_key);
+    wstr_copy(g_st.edited.model,         128, g_st.draft_openai_model);
     wstr_copy(g_st.edited.target_language, 64, lang);
     wstr_copy(g_st.edited.hotkey,        64, hotkey);
     wstr_copy(g_st.edited.exit_hotkey,   64, exitkey);
-    wstr_copy(g_st.edited.translation_provider, 32, provider);
+    wstr_copy(g_st.edited.translation_provider, 32, info->id);
 
     if (!config_save(&g_st.edited, g_app.config_path)) {
         set_status(L"保存失败，详情见日志文件");
@@ -686,7 +915,7 @@ static void build_layout(HWND hwnd)
     const int row     = scale(22);
     const int gap     = scale(4);
     const int line_h  = scale(15);
-    const int label_w = scale(76);
+    const int label_w = scale(84);
     const int edit_w  = scale(320);
     const int btn_w   = scale(82);
     const int btn_h   = scale(24);
@@ -707,32 +936,42 @@ static void build_layout(HWND hwnd)
                 WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
                 x_field, y, edit_w, row, IDC_COMBO_PROVIDER);
     if (provider_combo != NULL) {
-        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"DeepL（需密钥）");
-        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"OpenAI 兼容（需密钥）");
-        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"Google Web（免密钥）");
-        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"腾讯 TranSmart（暂不可用）");
-        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"Bing 网页（暂不可用）");
-        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"Microsoft Android（暂不可用）");
-        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"有道网页（暂不可用）");
-        SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)L"Yandex 网页（暂不可用）");
+        /* 下拉只列可见项；隐藏项不进列表，但仍留在注册表里 */
+        int count = provider_visible_count();
+        for (int i = 0; i < count; i++) {
+            const ProviderInfo *item = provider_visible_at(i);
+            if (item == NULL) continue;
+            const wchar_t *suffix = !item->implemented ? L"（暂不可用）"
+                                   : item->needs_key ? L"（需密钥）"
+                                                     : L"（免密钥）";
+            wchar_t label[128];
+            _snwprintf_s(label, 128, _TRUNCATE, L"%ls%ls", item->name, suffix);
+            SendMessageW(provider_combo, CB_ADDSTRING, 0, (LPARAM)label);
+        }
     }
     y += row + gap;
 
-    add_control(hwnd, L"STATIC", L"OpenAI 地址", SS_LEFT,
+    /* 接口地址：固定端点的提供商只读回显真实地址，OpenAI 兼容可自行修改 */
+    add_control(hwnd, L"STATIC", L"接口地址", SS_LEFT,
                 x_left, y + scale(4), label_w, line_h, IDC_LBL_BASE);
     add_control(hwnd, L"EDIT", L"",
                 WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
                 x_field, y, edit_w - btn_w - gap, row, IDC_EDIT_BASE);
+    SendDlgItemMessageW(hwnd, IDC_EDIT_BASE, EM_SETLIMITTEXT, 511, 0);
     add_control(hwnd, L"BUTTON", L"测试连接",
                 WS_TABSTOP | BS_PUSHBUTTON,
                 x_field + edit_w - btn_w, y, btn_w, row, IDC_BTN_TEST);
     y += row + gap;
 
-    add_control(hwnd, L"STATIC", L"OpenAI 密钥", SS_LEFT,
+    add_control(hwnd, L"STATIC", L"API 密钥", SS_LEFT | SS_ENDELLIPSIS,
                 x_left, y + scale(4), label_w, line_h, IDC_LBL_KEY);
     add_control(hwnd, L"EDIT", L"",
                 WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD,
-                x_field, y, edit_w, row, IDC_EDIT_KEY);
+                x_field, y, edit_w - btn_w - gap, row, IDC_EDIT_KEY);
+    SendDlgItemMessageW(hwnd, IDC_EDIT_KEY, EM_SETLIMITTEXT, 511, 0);
+    add_control(hwnd, L"BUTTON", L"申请地址",
+                WS_TABSTOP | BS_PUSHBUTTON,
+                x_field + edit_w - btn_w, y, btn_w, row, IDC_BTN_KEY_PAGE);
     y += row + gap;
 
     add_control(hwnd, L"STATIC", L"模型", SS_LEFT,
@@ -740,22 +979,16 @@ static void build_layout(HWND hwnd)
     add_control(hwnd, L"EDIT", L"",
                 WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
                 x_field, y, edit_w - btn_w - gap, row, IDC_EDIT_MODEL);
+    SendDlgItemMessageW(hwnd, IDC_EDIT_MODEL, EM_SETLIMITTEXT, 127, 0);
     add_control(hwnd, L"BUTTON", L"拉取列表",
                 WS_TABSTOP | BS_PUSHBUTTON,
                 x_field + edit_w - btn_w, y, btn_w, row, IDC_BTN_MODELS);
     y += row + gap;
 
-    add_control(hwnd, L"STATIC", L"DeepL 密钥", SS_LEFT,
-                x_left, y + scale(4), label_w, line_h, IDC_LBL_DEEPL_KEY);
-    add_control(hwnd, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL | ES_PASSWORD,
-                x_field, y, edit_w - btn_w - gap, row, IDC_EDIT_DEEPL_KEY);
-    SendDlgItemMessageW(hwnd, IDC_EDIT_DEEPL_KEY, EM_SETLIMITTEXT, 511, 0);
-    add_control(hwnd, L"BUTTON", L"测试连接", WS_TABSTOP | BS_PUSHBUTTON,
-                x_field + edit_w - btn_w, y, btn_w, row, IDC_BTN_DEEPL_TEST);
-    y += row + gap;
-    add_control(hwnd, L"STATIC", L"失败不会自动切换；DeepL / OpenAI 需配置各自密钥。", SS_LEFT,
-                x_field, y, edit_w, line_h, 0);
-    y += line_h + gap;
+    /* 提供商说明：真实接口地址与密钥申请地址都写在这里，方便看不惯按钮时手工复制 */
+    add_control(hwnd, L"STATIC", L"", SS_LEFT,
+                x_field, y, edit_w, line_h * 4, IDC_LBL_PROVIDER_HINT);
+    y += line_h * 4 + gap;
 
     add_control(hwnd, L"STATIC", L"目标语言", SS_LEFT,
                 x_left, y + scale(4), label_w, line_h, IDC_LBL_LANG);
@@ -858,32 +1091,40 @@ static void center_window(HWND hwnd, HWND owner)
                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-static int provider_combo_index(const wchar_t *provider)
-{
-    if (wstr_ieq(provider, TRANSLATION_PROVIDER_DEEPL)) return 0;
-    if (wstr_ieq(provider, TRANSLATION_PROVIDER_OPENAI)) return 1;
-    if (wstr_ieq(provider, TRANSLATION_PROVIDER_GOOGLE)) return 2;
-    if (wstr_ieq(provider, TRANSLATION_PROVIDER_TENCENT)) return 3;
-    if (wstr_ieq(provider, TRANSLATION_PROVIDER_BING)) return 4;
-    if (wstr_ieq(provider, TRANSLATION_PROVIDER_MS)) return 5;
-    if (wstr_ieq(provider, TRANSLATION_PROVIDER_YOUDAO)) return 6;
-    if (wstr_ieq(provider, TRANSLATION_PROVIDER_YANDEX)) return 7;
-    return 1;
-}
-
-/* 从当前配置填充控件 */
+/* 从当前配置填充控件。密钥按提供商分别放进草稿，再让 apply 只显示当前这家。 */
 static void fill_controls(const Config *cfg)
 {
-    SetDlgItemTextW(g_st.hwnd, IDC_EDIT_BASE,    cfg->api_base_url);
-    SetDlgItemTextW(g_st.hwnd, IDC_EDIT_KEY,     cfg->api_key);
-    SetDlgItemTextW(g_st.hwnd, IDC_EDIT_DEEPL_KEY, cfg->deepl_api_key);
-    SetDlgItemTextW(g_st.hwnd, IDC_EDIT_MODEL,   cfg->model);
+    const ProviderInfo *openai = provider_info(TRANSLATION_PROVIDER_OPENAI);
+
+    wstr_copy(g_st.draft_deepl_key, 512, cfg->deepl_api_key);
+    wstr_copy(g_st.draft_youdao_key, 512, cfg->youdao_api_key);
+    wstr_copy(g_st.draft_openai_key, 512, cfg->api_key);
+    wstr_copy(g_st.draft_openai_base, 512,
+              cfg->api_base_url[0] ? cfg->api_base_url
+                                   : (openai ? openai->base_url
+                                             : L"https://api.openai.com/v1"));
+    wstr_copy(g_st.draft_openai_model, 128, cfg->model);
+
     SetDlgItemTextW(g_st.hwnd, IDC_EDIT_LANG,    cfg->target_language);
     SetDlgItemTextW(g_st.hwnd, IDC_EDIT_HOTKEY,  cfg->hotkey);
     SetDlgItemTextW(g_st.hwnd, IDC_EDIT_EXITKEY, cfg->exit_hotkey);
 
-    SendDlgItemMessageW(g_st.hwnd, IDC_COMBO_PROVIDER, CB_SETCURSEL, provider_combo_index(cfg->translation_provider), 0);
-    update_provider_label();
+    int index = provider_visible_index_of(cfg->translation_provider);
+    if (index < 0) {
+        /* 配置里是已隐藏/未知的服务：回退到默认可用项，不静默留在隐藏通道上 */
+        index = provider_visible_index_of(provider_default_for(cfg));
+        if (index < 0) index = 0;
+        if (cfg->translation_provider[0] != 0) {
+            LOG_WARN("settings", L"配置里的提供商 %ls 已隐藏，本次按 %ls 显示",
+                     cfg->translation_provider,
+                     provider_visible_at(index) ? provider_visible_at(index)->id : L"默认");
+        }
+    }
+    SendDlgItemMessageW(g_st.hwnd, IDC_COMBO_PROVIDER, CB_SETCURSEL, index, 0);
+
+    /* 强制按配置里的提供商重填一次控件 */
+    g_st.shown_provider[0] = 0;
+    apply_provider_controls();
 }
 
 /* ---------- 窗口过程 ---------- */
@@ -1103,7 +1344,11 @@ static LRESULT CALLBACK settings_wnd_proc(HWND hwnd, UINT msg,
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
         case IDC_COMBO_PROVIDER:
-            if (HIWORD(wparam) == CBN_SELCHANGE) update_provider_label();
+            if (HIWORD(wparam) == CBN_SELCHANGE) {
+                apply_provider_controls();
+                /* 上一条测试结果是上一个提供商的，切完就作废 */
+                set_status(L"");
+            }
             return 0;
 
         case IDC_BTN_SAVE:
@@ -1121,14 +1366,20 @@ static LRESULT CALLBACK settings_wnd_proc(HWND hwnd, UINT msg,
             return 0;
 
         case IDC_BTN_TEST:
-            start_net_job(NET_TEST);
+            start_test_job();
             return 0;
-        case IDC_BTN_DEEPL_TEST:
-            start_net_job(NET_DEEPL);
+
+        case IDC_BTN_KEY_PAGE:
+            open_provider_key_page();
             return 0;
 
         case IDC_BTN_MODELS:
-            start_net_job(NET_MODELS);
+            start_models_job();
+            return 0;
+
+        /* EN_CHANGE：DeepL 密钥一改，地址栏跟着换成对应端点 */
+        case IDC_EDIT_KEY:
+            if (HIWORD(wparam) == EN_CHANGE) refresh_deepl_endpoint();
             return 0;
 
         /* 通知码 EN_SETFOCUS=0x0100，EN_KILLFOCUS=0x0200 */

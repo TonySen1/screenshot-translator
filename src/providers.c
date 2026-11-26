@@ -22,17 +22,148 @@ static wchar_t *copy_error(const wchar_t *text)
     return out;
 }
 
+/* 顺序即设置窗口下拉框的顺序；设置页、保存校验、连接测试都只查这张表，
+   不会再出现"界面切到 A、测试还打 B"的分叉。
+   PROVIDER_HIDDEN 的条目不会出现在下拉里，但适配器、历史配置与错误文案仍然认识它。 */
+#define PROVIDER_VISIBLE FALSE
+#define PROVIDER_HIDDEN  TRUE
+
+static const ProviderInfo kProviders[] = {
+    {
+        TRANSLATION_PROVIDER_DEEPL, L"DeepL",
+        L"https://api.deepl.com/v2", L"DeepL 密钥",
+        L"https://www.deepl.com/pro-api",
+        L"免费版密钥以 :fx 结尾，会自动改用 api-free.deepl.com。"
+        L"密钥申请：www.deepl.com/pro-api",
+        TRUE, FALSE, FALSE, TRUE, PROVIDER_VISIBLE
+    },
+    {
+        TRANSLATION_PROVIDER_OPENAI, L"OpenAI 兼容",
+        L"https://api.openai.com/v1", L"OpenAI 密钥",
+        L"https://platform.openai.com/api-keys",
+        L"地址可换成任意 OpenAI 格式端点（要带 /v1）。"
+        L"密钥申请：platform.openai.com/api-keys",
+        TRUE, TRUE, TRUE, TRUE, PROVIDER_VISIBLE
+    },
+    {
+        TRANSLATION_PROVIDER_GOOGLE, L"Google Web",
+        L"https://translate.googleapis.com/translate_a/t", L"免密钥",
+        NULL,
+        L"公开的无密钥文本端点（client=gtx），无需申请；只发送 OCR 文本，"
+        L"不读取浏览器 Cookie 或登录会话。",
+        FALSE, FALSE, FALSE, TRUE, PROVIDER_VISIBLE
+    },
+    {
+        TRANSLATION_PROVIDER_TENCENT, L"腾讯 TranSmart",
+        L"https://transmart.qq.com/api/imt", L"腾讯密钥",
+        L"https://console.cloud.tencent.com/tmt",
+        L"暂不可用（客户端签名协议未复现）。接口 transmart.qq.com/api/imt；"
+        L"控制台 console.cloud.tencent.com/tmt",
+        TRUE, FALSE, FALSE, FALSE, PROVIDER_HIDDEN
+    },
+    {
+        TRANSLATION_PROVIDER_BING, L"微软翻译",
+        L"https://edge.microsoft.com/translate/translatetext", L"免密钥",
+        L"https://www.bing.com/translator",
+        L"免密钥的公开端点（edge.microsoft.com/translate/translatetext），无需申请；"
+        L"只发送 OCR 文本。入口：www.bing.com/translator",
+        FALSE, FALSE, FALSE, TRUE, PROVIDER_VISIBLE
+    },
+    {
+        TRANSLATION_PROVIDER_MS, L"Microsoft Android",
+        L"https://api-edge.cognitive.microsofttranslator.com", L"Azure 密钥",
+        L"https://portal.azure.com/#create/Microsoft.CognitiveServicesTextTranslation",
+        L"暂不可用（签名端点需要运行时参数）。接口 api-edge.cognitive.microsofttranslator.com；"
+        L"申请 portal.azure.com 的「文本翻译」资源",
+        TRUE, FALSE, FALSE, FALSE, PROVIDER_HIDDEN
+    },
+    {
+        TRANSLATION_PROVIDER_YOUDAO, L"有道智云",
+        L"https://openapi.youdao.com/api", L"有道 ID:密钥",
+        L"https://ai.youdao.com/console/",
+        L"填「应用ID:应用密钥」（控制台里两段各复制一半，中间用冒号连起来）；"
+        L"需开通「文本翻译」服务。申请：ai.youdao.com/console",
+        TRUE, FALSE, FALSE, TRUE, PROVIDER_VISIBLE
+    },
+    {
+        TRANSLATION_PROVIDER_YANDEX, L"Yandex 网页",
+        L"https://translate.yandex.net/api/v1.5/tr.json/translate", L"Yandex 密钥",
+        L"https://translate.yandex.com/developers/keys",
+        L"暂不可用（公开端点需要密钥）。接口 translate.yandex.net/api/v1.5/tr.json/translate；"
+        L"申请 translate.yandex.com/developers/keys",
+        TRUE, FALSE, FALSE, FALSE, PROVIDER_HIDDEN
+    }
+};
+
+const ProviderInfo *provider_table(int *count)
+{
+    if (count) *count = (int)(sizeof(kProviders) / sizeof(kProviders[0]));
+    return kProviders;
+}
+
+const ProviderInfo *provider_at(int index)
+{
+    int count = (int)(sizeof(kProviders) / sizeof(kProviders[0]));
+    return (index >= 0 && index < count) ? &kProviders[index] : NULL;
+}
+
+int provider_index_of(const wchar_t *provider)
+{
+    if (provider == NULL || *provider == 0) return -1;
+    for (size_t i = 0; i < sizeof(kProviders) / sizeof(kProviders[0]); i++) {
+        if (wstr_ieq(provider, kProviders[i].id)) return (int)i;
+    }
+    return -1;
+}
+
+const ProviderInfo *provider_info(const wchar_t *provider)
+{
+    int index = provider_index_of(provider);
+    return index < 0 ? NULL : &kProviders[index];
+}
+
+/* 设置页的下拉索引：只数可见项，隐藏项不占位。 */
+int provider_visible_count(void)
+{
+    int count = 0;
+    for (size_t i = 0; i < sizeof(kProviders) / sizeof(kProviders[0]); i++) {
+        if (!kProviders[i].hidden) count++;
+    }
+    return count;
+}
+
+const ProviderInfo *provider_visible_at(int index)
+{
+    if (index < 0) return NULL;
+    int seen = 0;
+    for (size_t i = 0; i < sizeof(kProviders) / sizeof(kProviders[0]); i++) {
+        if (kProviders[i].hidden) continue;
+        if (seen == index) return &kProviders[i];
+        seen++;
+    }
+    return NULL;
+}
+
+int provider_visible_index_of(const wchar_t *provider)
+{
+    if (provider == NULL || *provider == 0) return -1;
+    int seen = 0;
+    for (size_t i = 0; i < sizeof(kProviders) / sizeof(kProviders[0]); i++) {
+        if (kProviders[i].hidden) continue;
+        if (wstr_ieq(provider, kProviders[i].id)) return seen;
+        seen++;
+    }
+    return -1;
+}
+
+BOOL provider_is_visible(const wchar_t *provider)
+{
+    return provider_visible_index_of(provider) >= 0;
+}
+
 BOOL provider_id_is_known(const wchar_t *provider)
 {
-    if (!provider || !*provider) return FALSE;
-    return wstr_ieq(provider, TRANSLATION_PROVIDER_DEEPL) ||
-           wstr_ieq(provider, TRANSLATION_PROVIDER_OPENAI) ||
-           wstr_ieq(provider, TRANSLATION_PROVIDER_GOOGLE) ||
-           wstr_ieq(provider, TRANSLATION_PROVIDER_TENCENT) ||
-           wstr_ieq(provider, TRANSLATION_PROVIDER_BING) ||
-           wstr_ieq(provider, TRANSLATION_PROVIDER_MS) ||
-           wstr_ieq(provider, TRANSLATION_PROVIDER_YOUDAO) ||
-           wstr_ieq(provider, TRANSLATION_PROVIDER_YANDEX);
+    return provider_index_of(provider) >= 0;
 }
 
 const wchar_t *provider_default_for(const Config *cfg)
@@ -54,14 +185,8 @@ BOOL provider_is_deepl(const Config *cfg)
 
 wchar_t *provider_unavailable_error(const wchar_t *provider)
 {
-    if (provider && wstr_ieq(provider, TRANSLATION_PROVIDER_BING)) {
-        return copy_error(L"Bing 网页翻译暂不可用：需要安全可复现的会话引导，程序不会抓取浏览器 Cookie");
-    }
     if (provider && wstr_ieq(provider, TRANSLATION_PROVIDER_MS)) {
         return copy_error(L"Microsoft Android 翻译暂不可用：签名端点需要源项目未提供的运行时签名参数");
-    }
-    if (provider && wstr_ieq(provider, TRANSLATION_PROVIDER_YOUDAO)) {
-        return copy_error(L"有道网页翻译暂不可用：会话与加密协议未安全复现");
     }
     if (provider && wstr_ieq(provider, TRANSLATION_PROVIDER_TENCENT)) {
         return copy_error(L"腾讯 TranSmart 暂不可用：当前未确认可公开复现的客户端密钥与主机回退协议");
@@ -267,7 +392,7 @@ BOOL google_translate_batch(const wchar_t *target,
     }
     wchar_t url[256];
     _snwprintf_s(url, 256, _TRUNCATE,
-                 L"https://translate.googleapis.com/translate_a/t?client=webapp&sl=auto&tl=%hs&hl=en&v=1.0&source=is",
+                 L"https://translate.googleapis.com/translate_a/t?client=gtx&dt=t&sl=auto&tl=%hs",
                  target_code);
     char *body = build_google_form(sources, count);
     if (!body) {
@@ -296,4 +421,144 @@ BOOL google_translate_batch(const wchar_t *target,
     if (!ok && error) *error = copy_error(L"Google 返回的译文数量或格式不正确，表格已拒绝对齐");
     http_response_free(&response);
     return ok;
+}
+
+wchar_t *google_test_connection(const wchar_t *target, int timeout_sec)
+{
+    static const wchar_t *const probe[] = {L"hello"};
+    wchar_t *translated[1] = {NULL};
+    wchar_t *error = NULL;
+
+    if (google_translate_batch(target, probe, 1, timeout_sec, translated, &error)) {
+        heap_free(translated[0]);
+        return NULL;
+    }
+    heap_free(translated[0]);
+    return error ? error : copy_error(L"Google 连接测试失败");
+}
+
+/* ---------- 微软翻译（edge.microsoft.com 免费端点） ----------
+ *
+ * 与需要 Azure 密钥的 api.cognitive.microsofttranslator.com 不同，这个端点
+ * 用 Edge 浏览器自带的翻译接口，不需要任何密钥：
+ *   POST https://edge.microsoft.com/translate/translatetext?to=<code>&isEnterpriseClient=false
+ *   body: ["text1","text2"]      -> [{"translations":[{"text":"..."}]}, ...]
+ */
+
+/* 中文按微软的 Hant/Hans 分法；其余沿用 BCP-47。 */
+static BOOL bing_target_code(const wchar_t *target, char out[16])
+{
+    char base[16];
+    if (!google_target_code(target, base)) return FALSE;
+    if (strcmp(base, "zh-CN") == 0)      { strcpy_s(out, 16, "zh-Hans"); return TRUE; }
+    if (strcmp(base, "zh-TW") == 0)      { strcpy_s(out, 16, "zh-Hant"); return TRUE; }
+    if (strcmp(base, "pt") == 0)         { strcpy_s(out, 16, "pt-PT"); return TRUE; }
+    strcpy_s(out, 16, base);
+    return TRUE;
+}
+
+BOOL bing_translate_batch(const wchar_t *target,
+                          const wchar_t *const *sources, int count,
+                          int timeout_sec, wchar_t **translations,
+                          wchar_t **error)
+{
+    if (error) *error = NULL;
+    if (!sources || !translations || count < 1 || count > 50) {
+        if (error) *error = copy_error(L"微软翻译请求的文本条数无效");
+        return FALSE;
+    }
+    for (int i = 0; i < count; i++) translations[i] = NULL;
+
+    char code[16];
+    if (!bing_target_code(target, code)) {
+        if (error) *error = copy_error(L"微软翻译的目标语言无法识别，请填写语言名称或代码");
+        return FALSE;
+    }
+
+    cJSON *array = cJSON_CreateArray();
+    BOOL built = array != NULL;
+    for (int i = 0; built && i < count; i++) {
+        char *text = u16_to_u8(sources[i] ? sources[i] : L"");
+        cJSON *item = text ? cJSON_CreateString(text) : NULL;
+        if (item == NULL) {
+            built = FALSE;
+        } else if (!cJSON_AddItemToArray(array, item)) {
+            cJSON_Delete(item);
+            built = FALSE;
+        }
+        heap_free(text);
+    }
+    char *body = built ? cJSON_PrintUnformatted(array) : NULL;
+    cJSON_Delete(array);
+    if (body == NULL) {
+        if (error) *error = copy_error(L"构造微软翻译请求失败");
+        return FALSE;
+    }
+
+    wchar_t url[192];
+    _snwprintf_s(url, 192, _TRUNCATE,
+                 L"https://edge.microsoft.com/translate/translatetext"
+                 L"?to=%hs&isEnterpriseClient=false", code);
+
+    const char *headers[] = {
+        "Content-Type: application/json",
+        "Accept: */*",
+        NULL
+    };
+    HttpResponse response = {0};
+    int timeout_ms = timeout_sec < 5 ? 5000 : (timeout_sec > 300 ? 300000 : timeout_sec * 1000);
+    BOOL sent = http_request_json_no_redirect(L"POST", url, headers, body,
+                                               strlen(body), timeout_ms, &response);
+    cJSON_free(body);
+
+    if (!sent) {
+        if (error) *error = copy_error(response.error[0] ? response.error
+                                                         : L"微软翻译网络请求失败");
+        http_response_free(&response);
+        return FALSE;
+    }
+    if (response.status < 200 || response.status >= 300) {
+        wchar_t message[128];
+        _snwprintf_s(message, 128, _TRUNCATE,
+                     L"微软翻译返回错误（%d），不会改用其他服务", response.status);
+        if (error) *error = copy_error(message);
+        http_response_free(&response);
+        return FALSE;
+    }
+
+    cJSON *root = response.body ? cJSON_Parse(response.body) : NULL;
+    BOOL ok = cJSON_IsArray(root) && cJSON_GetArraySize(root) == count;
+    for (int i = 0; ok && i < count; i++) {
+        const cJSON *item = cJSON_GetArrayItem(root, i);
+        const cJSON *items = cJSON_GetObjectItemCaseSensitive(item, "translations");
+        const cJSON *first = cJSON_GetArrayItem(items, 0);
+        const char *text = cJSON_GetStringValue(
+            cJSON_GetObjectItemCaseSensitive(first, "text"));
+        ok = text != NULL && *text != 0 && (translations[i] = u8_to_u16(text)) != NULL;
+    }
+    cJSON_Delete(root);
+
+    if (!ok) {
+        for (int i = 0; i < count; i++) {
+            heap_free(translations[i]);
+            translations[i] = NULL;
+        }
+        if (error) *error = copy_error(L"微软翻译返回的译文数量或格式不正确，表格已拒绝对齐");
+    }
+    http_response_free(&response);
+    return ok;
+}
+
+wchar_t *bing_test_connection(const wchar_t *target, int timeout_sec)
+{
+    static const wchar_t *const probe[] = {L"hello"};
+    wchar_t *translated[1] = {NULL};
+    wchar_t *error = NULL;
+
+    if (bing_translate_batch(target, probe, 1, timeout_sec, translated, &error)) {
+        heap_free(translated[0]);
+        return NULL;
+    }
+    heap_free(translated[0]);
+    return error ? error : copy_error(L"微软翻译连接测试失败");
 }

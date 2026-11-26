@@ -27,6 +27,13 @@ BOOL deepl_key_is_valid(const wchar_t *key)
     return TRUE;
 }
 
+const wchar_t *deepl_api_base(const wchar_t *key)
+{
+    size_t length = key ? wcslen(key) : 0;
+    BOOL free_plan = length >= 3 && wstr_ieq(key + length - 3, L":fx");
+    return free_plan ? L"https://api-free.deepl.com" : L"https://api.deepl.com";
+}
+
 BOOL deepl_target_language(const wchar_t *name, char out[DEEPL_TARGET_CAPACITY])
 {
     if (!name || !*name) return FALSE;
@@ -95,8 +102,7 @@ static cJSON *request(const wchar_t *key, BOOL usage, const char *body, int time
         return NULL;
     }
     size_t length = wcslen(key);
-    BOOL free_plan = length >= 3 && wstr_ieq(key + length - 3, L":fx");
-    const wchar_t *host = free_plan ? L"https://api-free.deepl.com" : L"https://api.deepl.com";
+    const wchar_t *host = deepl_api_base(key);
     wchar_t url[96];
     swprintf_s(url, 96, L"%ls/v2/%ls", host, usage ? L"usage" : L"translate");
     const char prefix[] = "Authorization: DeepL-Auth-Key ";

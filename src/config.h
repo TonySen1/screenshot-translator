@@ -8,6 +8,7 @@ typedef struct Config {
     wchar_t api_base_url[512];
     wchar_t api_key[512];
     wchar_t deepl_api_key[512]; /* 兼容旧配置；由 provider 决定是否使用 */
+    wchar_t youdao_api_key[512]; /* 有道「应用ID:应用密钥」；同上 */
     wchar_t translation_provider[32]; /* deepl / openai-compatible / google-web 等 */
     wchar_t model[128];
     wchar_t hotkey[64];

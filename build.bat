@@ -37,7 +37,7 @@ link /nologo /SUBSYSTEM:WINDOWS /ENTRY:wWinMainCRTStartup ^
      /OUT:build\screenshot-translator.exe ^
      build\*.obj build\app.res ^
      user32.lib gdi32.lib msimg32.lib gdiplus.lib winhttp.lib comctl32.lib shell32.lib ^
-     dwmapi.lib shcore.lib advapi32.lib ole32.lib
+     dwmapi.lib shcore.lib advapi32.lib ole32.lib bcrypt.lib
 if errorlevel 1 goto :failed
 
 echo.
